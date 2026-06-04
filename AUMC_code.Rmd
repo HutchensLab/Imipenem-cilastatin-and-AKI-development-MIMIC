@@ -1,0 +1,503 @@
+---
+title: "AUMC"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: united
+  pdf_document: 
+    toc: true
+    toc_depth: 3
+  word_document:
+    toc: true
+    toc_depth: '3'
+date: "`r Sys.Date()`"
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# [**AUMC**]{.underline}
+
+
+```{r read library, echo=F, warning=FALSE, message= FALSE, cache=TRUE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+\_\_
+
+### AUMC data managing
+
+#### 1. Base settings of R and data
+
+```{r download import, echo=T, warning=F, message= F}
+library(ricu) #install.packages("ricu")
+library(fst)#install.packages("fst")
+library(utils)
+library(tidyverse)
+library(units)
+library(dplyr)
+library(here)
+library(gtsummary) #install.packages("gtsummary")
+#install.packages("tinytex")
+#tinytex::install_tinytex()
+#Sys.which("pdflatex")
+
+###Set folder path
+Sys.setenv(RICU_DATA_PATH="C:\\Users\\aomura\\Desktop\\ricu2") #C:\\Users\\aomura\\OneDrive - Oregon Health & Science University\\Desktop\\ricu2
+###Set folder path
+dir3 <- paste0(ricu::data_dir(),"\\ams")
+#ricu::import_src("aumc", data_dir=dir3, force=T, verbose=T) <- Use only at 1st time.
+ricu::attach_src("aumc", data_dir = dir3, assign_env = NULL)
+src3  <- "aumc"
+
+#ricu::src_data_avail() 
+
+# below is about HiRID
+#list.files("C:\\Users\\aomura\\Desktop\\ricu2\\hirid", recursive = TRUE)
+# 作業ディレクトリ
+#base_dir <- "C:/Users/aomura/Desktop/ricu2/hirid"
+# 例：raw_stageのCSVファイル群を展開
+#untar(file.path(base_dir, "raw_stage/observation_tables_csv.tar.gz"), exdir = file.path(base_dir, "raw_stage/observation_tables_csv"))
+#untar(file.path(base_dir, "raw_stage/pharma_records_csv.tar.gz"), exdir = file.path(base_dir, "raw_stage/pharma_records_csv"))
+#untar(file.path(base_dir, "merged_stage/merged_stage_csv.tar.gz"), exdir = file.path(base_dir, "merged_stage/merged_stage_csv"))
+#untar(file.path(base_dir, "imputed_stage/imputed_stage_csv.tar.gz"), exdir = file.path(base_dir, "imputed_stage/imputed_stage_csv"))
+#untar(file.path(base_dir, "reference_data.tar.gz"), exdir = file.path(base_dir, "reference_data"))
+detach("package:ricu", unload = TRUE)
+```
+
+**\_\_**
+
+\_\_
+
+#### **2.AUMC carbapenems data**
+
+\_\_
+
+```{r aumc penem extract, warning=F}
+#extract the penems data from drug_item.csv
+#"start" is m_seconds after admission -> convert to hours
+#get first penem treatment data
+setwd("C:/Users/aomura/Desktop/ricu2/ams")
+penem_names <- "penem|PENEM|primaxin|Primaxin|PRIMAXIN|merrem|Merrem|MERREM|meronem|Meronem|MERONEM|invanz|Invanz|INVANZ|doribax|Doribax|DORIBAX|vabomere|Vabomere|VABOMERE|recarbrio|Recarbrio|RECABRIO"
+
+aumc_drugs <- read.csv("drugitems.csv")
+aumc_penems <- aumc_drugs[grep(penem_names, aumc_drugs$item, ignore.case=TRUE),]
+aumc_penems$time_ICUadmit_to_abx <- aumc_penems$start/1000/3600
+
+#check no pts start carbapenems before ICU admission
+#aumc_penems$time_ICUadmit_to_abx %>% min() %>% paste("min time from carbapenem to ICU admission =",.,"hour")
+
+aumc_penems$drug_type <- ifelse(aumc_penems$item=="Imipenem (Tienam)", "IMI", "non_IMI")
+aumc_1stpenems <- aumc_penems %>% group_by(admissionid) %>% filter(start==min(start))
+
+#check number of penems
+aumc_1stpenems %>% group_by(item) %>% summarise("N"=n(), "Unique N"=length(unique(admissionid))) %>% dplyr::rename("1st pts check"=item)  %>% rbind(c("counts, aumc_1stpenems", "", sum(.$'Unique N')),.)
+
+#check number of unique admissions
+#aumc_1stpenems$admissionid %>% unique() %>% length() # should be same as the above total number -> "same" means no pts assigened to both groups
+aumc_1stpenemsb <- aumc_1stpenems %>% dplyr::distinct(admissionid, .keep_all=T)
+
+#check time from admit to 1st-abx
+#aumc_1stpenemsb$time_ICUadmit_to_abx %>% summary() #all above 0 -> no need to exclude pts who started 1st_penem before ICU admission
+
+#assign the group, then make DF
+#aumc_1stpenemsb$drug_type <- ifelse(aumc_1stpenemsb$item=="Imipenem (Tienam)", "IMI", "non_IMI")
+aumc_DF0 <- aumc_1stpenemsb %>% dplyr::select(admissionid, drug_type, item, time_ICUadmit_to_abx)
+```
+
+
+```{r group transfer, message=F, warning=F}
+aumc_1st_IMI <- aumc_penems %>% filter(drug_type=="IMI") %>% group_by(admissionid) %>% filter(start==min(start)) %>% dplyr::select(admissionid, drug_type, time_ICUadmit_to_abx) %>% rename("time_ICUadmit_to_IMI"=time_ICUadmit_to_abx)
+aumc_1st_nonIMI <- aumc_penems %>% filter(drug_type=="non_IMI") %>% group_by(admissionid) %>% filter(start==min(start)) %>% dplyr::select(admissionid, drug_type, time_ICUadmit_to_abx) %>% rename("time_ICUadmit_to_nonIMI"=time_ICUadmit_to_abx)
+
+aumc_DF00 <- aumc_DF0 %>% left_join(aumc_1st_IMI %>% dplyr::select(-drug_type), by="admissionid") %>% 
+                        left_join(aumc_1st_nonIMI %>% dplyr::select(-drug_type), by="admissionid") %>% distinct()
+aumc_DF00$time_switch_group0 <- difftime(aumc_DF00$time_ICUadmit_to_nonIMI, aumc_DF00$time_ICUadmit_to_IMI) %>% as.numeric() %>% abs()
+
+aumc_DF00$time_switch_group <- ifelse(is.na(aumc_DF00$time_switch_group0), 168, ifelse(aumc_DF00$time_switch_group0>168, 168, aumc_DF00$time_switch_group0))
+aumc_DF <- aumc_DF00 %>% filter(time_switch_group>24)
+
+aumc_DF$admissionid %>% unique() %>% length() %>% paste("w/o group transfer within 24h =",.)
+```
+
+\_\_
+
+#### **3. AUMC crea data for patients inclusion**
+
+\_\_
+
+```{r aumc crea, message=F, warning=F}
+#getting Crea data
+ricu::attach_src("aumc", data_dir = dir3, assign_env = NULL)
+aumc_crea <- ricu::load_concepts("crea", src="aumc") %>% as.data.frame() %>% filter(admissionid %in% aumc_DF$admissionid)
+
+#assign 1st_abx data from base_DF to crea_DF, then calculate the time from abx to crea measurement
+aumc_crea2 <- aumc_crea %>% left_join(aumc_DF %>% dplyr::select(admissionid, time_ICUadmit_to_abx, time_switch_group), by="admissionid")
+aumc_crea2$time_abx_to_crea <- aumc_crea2$measuredat-aumc_crea2$time_ICUadmit_to_abx
+
+#Keep only crea data between -7d to 7d from abx 
+aumc_crea3 <- aumc_crea2 %>% subset(time_abx_to_crea>-168.1&time_abx_to_crea<168.1&time_abx_to_crea<time_switch_group) %>% dplyr::select(-measuredat)
+
+#Divide before/after crea data
+#Keep only pts who were measured for crea both before and after 1st-penem
+#check the remained pts
+aumc_bef_crea <- aumc_crea3 %>% subset(time_abx_to_crea<0)
+aumc_after_crea <- aumc_crea3 %>% subset(time_abx_to_crea>0)
+aumc_DF2 <- aumc_DF %>% filter(admissionid %in% aumc_bef_crea$admissionid) %>% filter(admissionid %in% aumc_after_crea$admissionid)
+aumc_DF2 %>% group_by(drug_type) %>% summarise("pts w/ bef&after crea"=n()) %>% rbind(c("total", sum(.$'pts w/ bef&after crea')),.)
+```
+
+\_\_
+
+#### **4. AUMC crea data**
+
+\_\_
+
+```{r aums base/outcome creatinine assessment, warning=F, message=F}
+#Get base_crea <- min crea between -7d to 0d for 1st-penem
+#aumc_bef_crea already limited -168 to 0
+aumc_base_crea <-aumc_bef_crea %>% group_by(admissionid) %>% filter(crea==min(crea)) %>% distinct() %>% dplyr::select(-time_ICUadmit_to_abx)
+
+#Get near_crea <- nearest crea to 1st_penem before 1st_penem
+aumc_near_crea <-aumc_bef_crea %>% group_by(admissionid) %>% filter(time_abx_to_crea==max(time_abx_to_crea)) %>% distinct() %>% dplyr::select(-time_ICUadmit_to_abx)
+
+#Put those base and near crea data to crea_DF
+aumc_crea4 <- aumc_crea3 %>% 
+  left_join(aumc_base_crea %>% rename("base_crea"=crea, "time_abx_to_basecrea"= time_abx_to_crea), by="admissionid") %>% 
+  left_join(aumc_near_crea %>% rename("near_crea"=crea, "time_abx_to_nearcrea"= time_abx_to_crea), by="admissionid") %>% 
+  distinct ()
+
+#Calculate base_KDIGO based on crea
+aumc_crea4$crea_ratio_near_by_base <- aumc_crea4$near_crea/aumc_crea4$base_crea
+aumc_crea4$base_KDIGO_crea_ratio <-  ifelse(aumc_crea4$near_crea>4, 3, 
+                                      ifelse(aumc_crea4$crea_ratio_near_by_base>3, 3,
+                                       ifelse(aumc_crea4$crea_ratio_near_by_base>1.99, 2, 
+                                        ifelse(aumc_crea4$crea_ratio_near_by_base>1.49, 1, 0))))
+aumc_crea4$crea_diff_near_with_base <- aumc_crea4$near_crea-aumc_crea4$base_crea
+aumc_crea4$base_KDIGO_crea_diff <-  ifelse(aumc_crea4$time_abx_to_nearcrea< -48.1, NA,
+                                     ifelse(aumc_crea4$time_abx_to_nearcrea> 0, NA, 
+                                      ifelse(aumc_crea4$crea_diff_near_with_base>0.29, 1, 0)))
+
+aumc_crea4$base_KDIGO_crea <- pmax(aumc_crea4$base_KDIGO_crea_ratio, aumc_crea4$base_KDIGO_crea_diff, na.rm=T)
+
+aumc_base_KDIGO_crea_summary <- aumc_crea4 %>% group_by(admissionid, time_ICUadmit_to_abx, base_crea, near_crea) %>% summarize("base_KDIGO_crea" = max(base_KDIGO_crea)) %>% distinct()
+
+#Calculate outcome_KDIGO based on crea
+aumc_crea4$ratio_to_basecrea <- aumc_crea4$crea/aumc_crea4$base_crea
+aumc_crea4$outcome_ratio_to_basecrea <- ifelse(as.numeric(aumc_crea4$time_abx_to_crea)<0, NA, aumc_crea4$ratio_to_basecrea)
+
+aumc_crea4$diff_to_basecrea <- aumc_crea4$crea-aumc_crea4$base_crea
+aumc_crea4$outcome_diff_to_basecrea <- ifelse(as.numeric(aumc_crea4$time_abx_to_crea)<0, NA, aumc_crea4$diff_to_basecrea)
+
+aumc_crea4$outcome_KDIGO_crea_ratio <- ifelse(aumc_crea4$time_abx_to_crea<0, NA, 
+                                     ifelse(aumc_crea4$crea>4, 3, 
+                                      ifelse(aumc_crea4$ratio_to_basecrea>3, 3,
+                                       ifelse(aumc_crea4$ratio_to_basecrea>1.99, 2,
+                                        ifelse(aumc_crea4$ratio_to_basecrea>1.49, 1, 0)))))
+aumc_crea4$outcome_KDIGO_crea48 <-  ifelse(aumc_crea4$time_abx_to_crea<0, NA, 
+                                     ifelse(aumc_crea4$time_abx_to_crea>48, NA, 
+                                     ifelse(aumc_crea4$crea>4, 3, 
+                                      ifelse(aumc_crea4$diff_to_basecrea>0.3, 1, 0))))
+aumc_crea4$outcome_KDIGO_crea <- pmax(aumc_crea4$outcome_KDIGO_crea_ratio, aumc_crea4$outcome_KDIGO_crea48, na.rm = T)
+
+aumc_outcome_KDIGO_crea_summary <- aumc_crea4 %>% group_by(admissionid) %>% 
+  summarize("outcome_KDIGO_crea" = max(outcome_KDIGO_crea, na.rm=T), 
+            "outcome_max_crea_diff" = max(outcome_diff_to_basecrea, na.rm=T), 
+            "outcome_max_crea_ratio" = max(outcome_ratio_to_basecrea, na.rm=T)) %>% distinct()
+```
+
+\_\_
+
+#### **5. AUMC dialysis data**
+
+\_\_
+
+```{r aumc dial, warning=F}
+#check dialysis names
+setwd("C:/Users/aomura/Desktop/ricu2/ams")
+aumc_procs <- read.csv("processitems.csv") %>% subset(admissionid %in% aumc_DF2$admissionid)
+aumc_procs[grepl("CVV|CRR|dialys|Dialy", aumc_procs$item),] %>% .$item %>% unique() %>% data.frame(.) %>% dplyr::rename("HD names"=".") #seems only "CVVH" & "Hemodialyse"
+
+#get dialysis data
+aumc_1stdials <- aumc_procs[grepl("CVVH|Hemodialyse", aumc_procs$item),] %>% group_by(admissionid) %>% filter(start==min(start))
+aumc_1stdials$time_admit_to_HD <- aumc_1stdials$start/1000/3600
+
+#add the time for 1st-penem, then caluculate between penem and 1st-dial
+aumc_1stdials2 <- aumc_1stdials %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx, time_switch_group), by="admissionid")
+aumc_1stdials2$time_abx_to_HD <- aumc_1stdials2$time_admit_to_HD - aumc_1stdials2$time_ICUadmit_to_abx
+aumc_1stdials2b <- aumc_1stdials2 %>% filter(time_abx_to_HD>-168, time_abx_to_HD<168, time_abx_to_HD<time_switch_group)
+
+#calculate base and outcome KDIGO based on dialy data
+aumc_1stdials2b$base_KDIGO_dial <- ifelse(aumc_1stdials2b$time_abx_to_HD> 0, NA, 3)
+aumc_1stdials2b$outcome_KDIGO_dial <- ifelse(aumc_1stdials2b$time_abx_to_HD< 0, NA, 
+                                   ifelse(aumc_1stdials2b$time_abx_to_HD> 168, NA, 3))
+
+#remove HD event after group transfer
+aumc_1stdials3 <- aumc_1stdials2b %>% subset(time_abx_to_HD < time_switch_group)
+```
+
+\_\_
+
+#### **6. AUMC patient base data (age, sex, sofa...)**
+
+##### Age is binned in AUMC. So, I alos binned age data in MIMIC3 above.
+
+\_\_
+
+```{r aumc base, warning=F, message=F}
+#Get aumc basic data
+setwd("C:/Users/aomura/Desktop/ricu2/ams")
+aumc_admit_DF0 <- read.csv("admissions.csv") %>% subset(admissionid %in% aumc_DF2$admissionid)
+aumc_bmi <- ricu::load_concepts("bmi", "aumc") %>% as.data.frame()
+aumc_admit_DF <- aumc_admit_DF0 %>% left_join(aumc_bmi, by="admissionid")
+aumc_admit_DF$sex <- ifelse(aumc_admit_DF$gender=="Man", "Male", 
+                       ifelse(aumc_admit_DF$gender=="Vrouw", "Female", NA)) 
+aumc_admit_DF$age_cat <- ifelse(aumc_admit_DF$agegroup=="18-39", 30, 
+                          ifelse(aumc_admit_DF$agegroup=="40-49", 45,
+                           ifelse(aumc_admit_DF$agegroup=="50-59", 55,
+                            ifelse(aumc_admit_DF$agegroup=="60-69", 65,
+                             ifelse(aumc_admit_DF$agegroup=="70-79", 75,
+                              ifelse(aumc_admit_DF$agegroup=="80+", 85, NA))))))
+```
+
+```{r aumc_sofa}
+#get aumc sofa data (nearest to 1st-penem)
+#aumc_sofa_DF <- ricu::load_concepts("sofa", "aumc") %>% as.data.frame() %>% subset(admissionid %in% aumc_DF2$admissionid)
+#write.csv(aumc_sofa_DF, "aumc_sofa_DF.csv")
+aumc_sofa_DF <- read.csv("aumc_sofa_DF.csv") %>% .[-1]
+aumc_sofa_DF2 <- aumc_sofa_DF %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% distinct() %>%  mutate(time_abx_to_sofa=measuredat-time_ICUadmit_to_abx)
+aumc_near_sofa <- aumc_sofa_DF2 %>% subset(time_abx_to_sofa>-168.1&time_abx_to_sofa<0.01) %>% group_by(admissionid) %>% filter(time_abx_to_sofa==max(time_abx_to_sofa))
+
+#aumc_sofa_cns <- ricu::load_concepts("sofa_cns", src="aumc") %>% as.data.frame() 
+#saveRDS(aumc_sofa_cns,"aumc_sofa_cns.rds")
+aumc_sofa_cns <- readRDS("aumc_sofa_cns.rds") %>% as.data.frame() %>% filter(admissionid %in% aumc_DF2$admissionid) 
+aumc_sofa_cns2 <- aumc_sofa_cns %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% mutate(time_abx_to_sofa=measuredat-time_ICUadmit_to_abx)
+aumc_near_sofa_cns <- aumc_sofa_cns2 %>% subset(time_abx_to_sofa>-168.1&time_abx_to_sofa<0.01) %>% group_by(admissionid) %>% filter(time_abx_to_sofa==max(time_abx_to_sofa))
+
+#aumc_sofa_renal <- ricu::load_concepts("sofa_renal", src="aumc") %>% as.data.frame() 
+#saveRDS(aumc_sofa_renal,"aumc_sofa_renal.rds")
+aumc_sofa_renal <- readRDS("aumc_sofa_renal.rds") %>% as.data.frame() %>% filter(admissionid %in% aumc_DF2$admissionid) 
+aumc_sofa_renal2 <- aumc_sofa_renal %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% mutate(time_abx_to_sofa=measuredat-time_ICUadmit_to_abx)
+aumc_near_sofa_renal <- aumc_sofa_renal2 %>% subset(time_abx_to_sofa>-168.1&time_abx_to_sofa<0.01) %>% group_by(admissionid) %>% filter(time_abx_to_sofa==max(time_abx_to_sofa))
+
+#aumc_sep <- ricu::load_concepts("sep3", src="aumc") %>% as.data.frame() 
+#saveRDS(aumc_sep,"aumc_sep.rds")
+aumc_sep <- readRDS("aumc_sep.rds") %>% as.data.frame() %>% filter(admissionid %in% aumc_DF2$admissionid) 
+aumc_sep <- aumc_sep %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% mutate(time_abx_to_sofa=measuredat-time_ICUadmit_to_abx)
+aumc_near_sep <- aumc_sep %>% subset(time_abx_to_sofa>-168.1&time_abx_to_sofa<0.01) %>% group_by(admissionid) %>% filter(time_abx_to_sofa==max(time_abx_to_sofa))
+
+#aumc_sirs <- ricu::load_concepts("sirs", src="aumc") %>% as.data.frame() 
+#saveRDS(aumc_sirs,"aumc_sirs.rds")
+aumc_sirs <- readRDS("aumc_sirs.rds") %>% as.data.frame() %>% filter(admissionid %in% aumc_DF2$admissionid) 
+aumc_sirs <- aumc_sirs %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% mutate(time_abx_to_sofa=measuredat-time_ICUadmit_to_abx)
+aumc_near_sirs <- aumc_sirs %>% subset(time_abx_to_sofa>-168.1&time_abx_to_sofa<0.01) %>% group_by(admissionid) %>% filter(time_abx_to_sofa==max(time_abx_to_sofa))
+
+#aumc_qsofa <- ricu::load_concepts("qsofa", src="aumc") %>% as.data.frame() 
+#saveRDS(aumc_qsofa,"aumc_qsofa.rds")
+aumc_qsofa <- readRDS("aumc_qsofa.rds") %>% as.data.frame() %>% filter(admissionid %in% aumc_DF2$admissionid) 
+aumc_qsofa <- aumc_qsofa %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% mutate(time_abx_to_sofa=measuredat-time_ICUadmit_to_abx)
+aumc_near_qsofa <- aumc_qsofa %>% subset(time_abx_to_sofa>-168.1&time_abx_to_sofa<0.01) %>% group_by(admissionid) %>% filter(time_abx_to_sofa==max(time_abx_to_sofa))
+```
+
+
+```{r cardiac surgery hisotryusing ICD code, message=F, warning=F, include=F}
+###Check cardiac surgery before Abx using ICD code
+#setwd("C:/Users/aomura/Desktop/ricu2/ams")
+#aumc_procs <- read.csv("processitems.csv") %>% subset(admissionid %in% aumc_DF2$admissionid)
+#aumc_procedures <- read.csv("procedureorderitems.csv") %>% subset(admissionid %in% aumc_DF2$admissionid)
+#aumc_list <- read.csv("listitems.csv") %>% subset(admissionid %in% aumc_DF2$admissionid)
+#aumc_surgery <- aumc_list %>% filter(grepl("chiru", aumc_list$item, ignore.case = TRUE)|grepl("chiru", aumc_list$value, ignore.case = TRUE))
+#write.csv(aumc_surgery, "aumc_surgery.csv")
+#aumc_surgery <- read.csv("aumc_surgery.csv")
+
+#aumc_surgery %>% dplyr::select(item, value) %>% distinct() %>% arrange(value)
+
+#aumc_surgery2 <- aumc_surgery %>% filter(value %in% c("AVR", "MVR", "CABG", "EVAR","Aorta chirurgie", "Aorta chirurgie", "Aorta-boog vervanging", "Bentall", "Gecombineerde hartchirurgie", "Thoraco-abdominale aorta vervanging", "Mediastinitis", "CCH - Cardiochirurgie", "Vaatchirurgie abdominaal")) %>% mutate("surgtime"=measuredat/1000/3600) 
+
+###other potential names
+#D_Subgroep_Thoraxchirurgie	Cardio anders
+#D_Thoraxchirurgie_Pulmonale chirurgie	Diagnose anders
+#D_Algemene chirurgie_Vaatchirurgie	Diagnose anders
+#DMC_Thoraxchirurgie_Pulmonale chirurgie	Diagnose anders
+#ViaOK	Ja, cardio chirurgisch
+#D_Thoraxchirurgie_CABG en Klepchirurgie	Diagnose anders
+#D_Thoraxchirurgie_Cardio anders	Diagnose anders
+#D_Thoraxchirurgie_Cardio anders	Ontlasting pericardeffusie
+#D_Thoraxchirurgie_Pulmonale chirurgie	Overige thoraxchirurgie
+#DMC_Thoraxchirurgie_Pulmonale chirurgie	Overige thoraxchirurgie
+#D_Hoofdgroep	Thoraxchirurgie		
+#DMC_Hoofdgroep	Thoraxchirurgie
+#Pati\xebnt Specialisme	VAT - Vaatchirurgie
+#D_Subgroep_Algemene chirurgie	Vaatchirurgie		
+#D_Algemene chirurgie_Vaatchirurgie	Vaatchirurgie abdominaal		
+
+#aumc_surgery3 <- aumc_surgery2 %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% distinct() %>%  mutate("time_abx_to_surg"=surgtime-time_ICUadmit_to_abx) %>% distinct() %>% filter(time_abx_to_surg> -168, time_abx_to_surg<0)
+```
+```{r aumc_los, message=F}
+#Get ohter outcome data using "load_concept"
+aumc_dep_type_DF <- ricu::load_concepts("adm", src="aumc") %>% filter(admissionid %in% aumc_DF2$admissionid) %>% as.data.frame() %>% rename("dep_type0" = adm)
+
+
+
+aumc_death_DF0 <- ricu::load_concepts("death", src="aumc") %>% left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx, time_switch_group)) %>%
+                 filter(!is.na(time_ICUadmit_to_abx), death==T) %>% mutate("time_abx_to_death" = index_var - time_ICUadmit_to_abx)
+aumc_death_DF <- aumc_death_DF0 %>% filter(time_abx_to_death<168, time_abx_to_death<time_switch_group)
+
+aumc_los_icu_DF0 <- ricu::load_concepts("los_icu", src="aumc") %>% filter(admissionid %in% aumc_DF2$admissionid) %>% 
+                   left_join(aumc_DF2 %>% dplyr::select(admissionid, time_ICUadmit_to_abx, time_switch_group)) %>%
+                   filter(!is.na(time_ICUadmit_to_abx)) %>% mutate("time_abx_to_losicu" = as.numeric(los_icu*24, units="hours") - time_ICUadmit_to_abx)
+aumc_los_icu_DF <- aumc_los_icu_DF0 %>% filter(time_abx_to_losicu<168, time_abx_to_losicu<time_switch_group)
+```
+
+\_\_
+
+#### **7. Combined data to DF (AUMC)**
+
+\_\_
+
+```{r aumc combine, warning=F}
+#Combine crea, dialy, baseic data to base_DF 
+aumc_DF3 <- aumc_DF2 %>% 
+             left_join(aumc_base_KDIGO_crea_summary %>% as.data.frame()%>% 
+                       dplyr::select(admissionid, base_KDIGO_crea, base_crea, near_crea), by="admissionid") %>% 
+             left_join(aumc_outcome_KDIGO_crea_summary, by="admissionid") %>% 
+             left_join(aumc_1stdials3 %>% dplyr::select(admissionid, base_KDIGO_dial, outcome_KDIGO_dial), by="admissionid") %>% 
+             left_join(aumc_admit_DF %>% dplyr::select(admissionid, agegroup, age_cat, sex, bmi, urgency), by="admissionid") %>% 
+             left_join(aumc_near_sofa %>% dplyr::select(admissionid, sofa), by="admissionid") %>%
+             left_join(aumc_near_sofa_cns %>% dplyr::select(admissionid, sofa_cns), by="admissionid") %>% 
+             left_join(aumc_near_sofa_renal %>% dplyr::select(admissionid, sofa_renal), by="admissionid") %>% 
+             left_join(aumc_near_sep %>% dplyr::select(admissionid, sep3), by="admissionid") %>% 
+             left_join(aumc_near_sirs %>% dplyr::select(admissionid, sirs), by="admissionid") %>% 
+             left_join(aumc_near_qsofa %>% dplyr::select(admissionid, qsofa), by="admissionid") %>% 
+             #left_join(aumc_surgery3 %>% dplyr::select(admissionid, time_abx_to_surg), by="admissionid") %>% 
+             #left_join(., aumc_los_hosp_DF, by="admissionid") %>%
+             left_join(., aumc_los_icu_DF %>% dplyr::select(-time_ICUadmit_to_abx, -time_switch_group), by="admissionid") %>%
+             left_join(., aumc_death_DF %>% dplyr::select(admissionid, time_abx_to_death), by="admissionid") %>% 
+             left_join(., aumc_dep_type_DF, by="admissionid") %>%  distinct()
+aumc_DF3$dep_type <- ifelse(is.na(aumc_DF3$dep_type0), "other", 
+                            ifelse(aumc_DF3$dep_type0=="Unknown", "other", aumc_dep_type_DF$dep_type0))
+aumc_DF3$base_KDIGO <- pmax(aumc_DF3$base_KDIGO_crea, aumc_DF3$base_KDIGO_dial, na.rm = T)
+#aumc_DF3$cardiac_surgery <- ifelse(is.na(aumc_DF3$time_abx_to_surg), F, T)
+aumc_DF3$outcome_KDIGO <- pmax(aumc_DF3$outcome_KDIGO_crea, aumc_DF3$outcome_KDIGO_dial, na.rm = T)
+
+aumc_DF3$outcome_KDIGO_inc <- ifelse(aumc_DF3$base_KDIGO>2.9, NA, 
+                                     ifelse(aumc_DF3$base_KDIGO<aumc_DF3$outcome_KDIGO, T, F))
+aumc_DF3$outcome_new_dial <- ifelse(!is.na(aumc_DF3$base_KDIGO_dial), NA, 
+                              ifelse(is.na(aumc_DF3$outcome_KDIGO_dial), F, T))
+aumc_DF3$death_in_hosp <- ifelse(is.na(aumc_DF3$time_abx_to_death), F, T)
+aumc_DF3$death_in_7d <- ifelse(is.na(aumc_DF3$time_abx_to_death), F, 
+                                                 ifelse(aumc_DF3$time_abx_to_death <168, T, F))
+aumc_DF3$outcome_KDIGO_inc_or_death <- ifelse(is.na(aumc_DF3$outcome_KDIGO_inc), NA, 
+                                            ifelse(aumc_DF3$outcome_KDIGO_inc==T, T,
+                                             ifelse(aumc_DF3$death_in_7d==T,T, F)))
+
+#exclude pts without sofa or sex, then check it
+aumc_DF4 <- aumc_DF3 %>% subset( !is.na(sex)) #!is.na(sofa)&
+aumc_DF4$admissionid %>% unique() %>% length() %>% paste("Unknown sex excluded =",.)
+
+aumc_DF4$sofa_cns <- ifelse(is.na(aumc_DF4$sofa_cns), 0, aumc_DF4$sofa_cns) #30-40 sofa_cns are NA probably due to sedation (no NA for sofa_renal). inpute 0
+aumc_DF4$sofa_cns <- ifelse(is.na(aumc_DF4$sofa_cns), 0, aumc_DF4$sofa_cns)
+aumc_DF4$sofa_others0 <- aumc_DF4$sofa - aumc_DF4$sofa_cns - aumc_DF4$sofa_renal
+aumc_DF4$sofa_others <- ifelse(aumc_DF4$sofa_others0<0, 0, aumc_DF4$sofa_others0)
+
+#aumc_DF4$sofa_cns %>% summary() #-> aumc_cns NA365. no NA in renal
+```
+
+
+
+```{r susp_inf, warning=F} 
+#list <- read.csv("listitems.csv")
+#aumc_cult_names <- "kwek|KWEK|Kwek"
+#list$item %>% unique() %>% .[grep(kname, list$item %>% unique())]
+#aumc_procs$item %>% unique() %>% .[grep(kname, aumc_procs$item %>% unique())]
+setwd("C:/Users/aomura/Desktop/ricu2/ams")
+proc2 <- read.csv("procedureorderitems.csv")
+aumc_cult <- proc2[grep("kwek", proc2$item),] %>% filter(item!="SDD-kweken afnemen" & item!="SDD Inventarisatiekweken afnemen" & item!="MRSA kweken afnemen")
+aumc_cult$time_admit_to_cult <- aumc_cult$registeredat/1000/3600
+aumc_cult2 <- aumc_cult %>% left_join(aumc_DF4 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% filter(!is.na(time_ICUadmit_to_abx))
+aumc_cult2$time_abx_to_cult <- aumc_cult2$time_admit_to_cult - aumc_cult2$time_ICUadmit_to_abx
+aumc_cult3 <- aumc_cult2 %>% filter(time_admit_to_cult> -72 & time_admit_to_cult<24) %>% mutate("pre_blood_culture"=T)
+
+aumc_DF5 <- aumc_DF4 %>% left_join(aumc_cult3 %>% dplyr::select(admissionid, pre_blood_culture), by="admissionid") %>% distinct()
+aumc_DF5$pre_blood_culture <- ifelse(is.na(aumc_DF5$pre_blood_culture), F, T)
+
+```
+
+```{r vancomycin, message=F, warning=F}
+van_names <- "vanco|firvanq|lyphocin"
+setwd("C:/Users/aomura/Desktop/ricu2/ams")
+aumc_received_van <- read.csv("drugitems.csv") %>% filter(admissionid %in% aumc_DF5$admissionid) %>% .[grep(van_names, .$item, ignore.case=TRUE),]
+#aumc_received_van$item %>% unique()
+
+aumc_received_van$starttime <- aumc_received_van$start/1000/3600
+aumc_received_van2 <- left_join(aumc_received_van %>% dplyr::select(admissionid, starttime),
+                              aumc_DF5 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% na.omit() %>% 
+  mutate("hour_van_to_abx"=(starttime-time_ICUadmit_to_abx)/3600 %>% as.numeric()) %>% filter(abs(hour_van_to_abx)<24) %>% mutate("treat_van"=T)
+
+aumc_DF6 <- left_join(aumc_DF5, aumc_received_van2 %>% dplyr::select(admissionid, treat_van), by="admissionid") %>% distinct() %>% mutate("treat_van"=ifelse(is.na(treat_van), F, T))
+```
+```{r vanso, message=F, warning=F}
+ricu::attach_src("aumc", data_dir = dir3, assign_env = NULL)
+aumc_vaso <-
+rbind(
+ricu::load_concepts("adh_rate", src="aumc") %>% filter(admissionid %in% aumc_DF6$admissionid) %>% .[,1:2],
+ricu::load_concepts("dobu_rate", src="aumc") %>% filter(admissionid %in% aumc_DF6$admissionid) %>% .[,1:2],
+ricu::load_concepts("dopa_rate", src="aumc") %>% filter(admissionid %in% aumc_DF6$admissionid) %>% .[,1:2],
+ricu::load_concepts("epi_rate", src="aumc") %>% filter(admissionid %in% aumc_DF6$admissionid) %>% .[,1:2],
+ricu::load_concepts("norepi_rate", src="aumc") %>% filter(admissionid %in% aumc_DF6$admissionid) %>% .[,1:2],
+ricu::load_concepts("phn_rate", src="aumc") %>% filter(admissionid %in% aumc_DF6$admissionid) %>% .[,1:2])
+
+aumc_vaso2 <-
+aumc_vaso %>% left_join(aumc_DF6 %>% dplyr::select(admissionid, time_ICUadmit_to_abx)) %>% mutate("time_abx_to_vaso"=start-time_ICUadmit_to_abx) %>% filter(time_abx_to_vaso> -168 & time_abx_to_vaso<0) %>% group_by(admissionid) %>% summarize("vasopressor"=min(time_abx_to_vaso))
+
+aumc_DF7 <- aumc_DF6 %>% left_join(aumc_vaso2) %>% distinct()
+aumc_DF7$vasopressor <- ifelse(is.na(aumc_DF7$vasopressor), F, T)
+```
+
+```{r vent, message=F, warning=F}
+aumc_vent <- rbind(
+ricu::load_concepts("vent_ind", src="aumc") %>% filter(admissionid %in% aumc_DF7$admissionid) %>% .[,1:3],
+ricu::load_concepts("mech_vent", src="aumc") %>% filter(admissionid %in% aumc_DF7$admissionid) %>% .[,1:3]) %>%  mutate("end"=as.numeric(start)+as.numeric(dur_var)/60)
+
+aumc_vent2 <- aumc_vent %>% left_join(aumc_DF7 %>% dplyr::select(admissionid, time_ICUadmit_to_abx)) %>% mutate("time_abx_to_vent_start"=start-time_ICUadmit_to_abx, "time_abx_to_vent_end"=end-time_ICUadmit_to_abx) %>% filter(time_abx_to_vent_start<0 & time_abx_to_vent_end>0) %>% mutate(ventilation=T) %>% distinct()
+
+aumc_DF8 <- aumc_DF7 %>% left_join(aumc_vent2 %>% dplyr::select(admissionid, ventilation), by="admissionid") %>% distinct()
+aumc_DF8$ventilation <- ifelse(is.na(aumc_DF8$ventilation), F, T)
+```
+
+```{r carbapenems count, message=F}
+aumc_penems_counts <- 
+aumc_penems %>% dplyr::select(admissionid, item, start) %>% mutate("start2"=start/3600/1000) %>% 
+  left_join(aumc_DF8 %>% dplyr::select(admissionid, time_ICUadmit_to_abx), by="admissionid") %>% 
+  mutate("time_first_abx_to_abx"=difftime(start2, time_ICUadmit_to_abx)) %>% filter(time_first_abx_to_abx<168) %>% 
+  group_by(admissionid, item) %>% summarise(n()) %>% pivot_wider(names_from = item, values_from = "n()")
+
+aumc_penems_counts[is.na(aumc_penems_counts)] <- 0
+
+aumc_DF9 <- left_join(aumc_DF8, aumc_penems_counts, by="admissionid") %>% rename("Meropenem"="Meropenem (Meronem)", "Imipenem/Cilastatin"="Imipenem (Tienam)") %>% mutate("Ertapenem"=0, "Doripenem"=0, "Imipenem/Cilastatin/Relebactam"=0)
+```
+
+```{r observation, message=F}
+aumc_crea_ob_DF <- aumc_crea2 %>% group_by(admissionid) %>% summarize('last_crea'=max(time_abx_to_crea)) %>% na.omit()
+aumc_dial_ob_DF <- aumc_1stdials2b %>% group_by(admissionid) %>% summarize('last_dial'=max(time_abx_to_HD)) 
+
+aumc_obs_summary <- aumc_crea_ob_DF %>% dplyr::select(admissionid, last_crea) %>% 
+                left_join(aumc_dial_ob_DF %>% dplyr::select(admissionid, last_dial), by="admissionid") %>% 
+                left_join(aumc_death_DF0 %>% dplyr::select(admissionid, time_abx_to_death), by="admissionid") %>% 
+                left_join(aumc_los_icu_DF0 %>% dplyr::select(admissionid, time_abx_to_losicu), by="admissionid") %>% 
+                left_join(aumc_DF9 %>% dplyr::select(admissionid, time_switch_group), by="admissionid")
+
+aumc_obs_summary$obs_period0 <- pmax(aumc_obs_summary$last_crea, aumc_obs_summary$last_dial, aumc_obs_summary$time_abx_to_death, aumc_obs_summary$time_abx_to_losicu, na.rm = T)
+aumc_obs_summary$obs_period <- pmin(aumc_obs_summary$obs_period0, aumc_obs_summary$time_switch_group, 168, na.rm = T)
+aumc_DF10 <- left_join(aumc_DF9, aumc_obs_summary %>% dplyr::select(admissionid, obs_period, time_abx_to_death, time_abx_to_losicu), by="admissionid")
+```
+
+```{r aumc save data}
+aumc_DF11 <- aumc_DF10 %>% rename("age_group"=agegroup, "icustay_id"=admissionid, "drug"=item) %>% mutate("hadm_id"=NA)
+write.csv(aumc_DF11, "MDF_aumc.csv")
+c(paste("total =", read.csv("MDF_aumc.csv") %>% .$icustay_id %>% unique() %>% length()),
+  paste("base AKI <3 =", read.csv("MDF_aumc.csv") %>% filter(base_KDIGO<2.9) %>% .$icustay_id %>% unique() %>% length())
+  )
+saveRDS(aumc_crea4, "aumc_crea4.rds")
+```

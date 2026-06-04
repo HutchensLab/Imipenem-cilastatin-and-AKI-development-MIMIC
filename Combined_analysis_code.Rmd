@@ -1,0 +1,1399 @@
+---
+title: "Analysis using 3 datasets"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    theme: united
+  word_document:
+    toc: true
+    toc_depth: '4'
+  pdf_document: 
+    toc: true
+    toc_depth: 4
+date: "`r Sys.Date()`"
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# [Does Imipenem-cilastatin less develop/worsen AKI than other carbapenems?]{.underline}
+
+**\_\_**
+
+-   Patients in MIMIC3, MIMIC4, AUMC
+
+-   Those treated with imipenem/cilastatin (I/C group) vs non-cilastatin
+    carbapenems (NCC group)
+
+-   Primary outcome is development or progression of AKI (compare AKI
+    stage at treatment start and after treatment start)
+
+-   Using propensity score overlap weighting to adjust patients
+    backgrounds.
+
+-   Using random mixed effect meta-analysis to combine the results of
+    each dataset.
+
+\_\_
+
+## Results (background and outcomes)
+
+\_
+
+### [**1. Backgrounds and outcome development of the patients (before matching)**]{.underline}
+
+Patient characteristics and outcome development in 7 days.
+
+["O, " are the outcomes.]{.underline} **Primary outcome is ["AKI
+development or progression"]{.underline}**
+
+```{r table one, fig.height=3, fig.width=6, message=FALSE, warning=FALSE}
+library(cobalt) #install.packages("cobalt")
+library(pROC)
+library(MatchIt) #install.packages("MatchIt")
+library(tidyverse)
+SELECTS <- c("dataset", "age_cat", "age_group", "sex", "bmi","drug_type", "Imipenem.Cilastatin", "Imipenem.Cilastatin.Relebactam", "time_switch_group", "dep_type",  "time_ICUadmit_to_abx", "pre_blood_culture", "treat_van","vasopressor", "ventilation", "sofa","qsofa", "sirs", "sep3", "base_crea", "near_crea","base_KDIGO", "obs_period", "base_KDIGO_dial", "base_KDIGO_dial", "outcome_KDIGO", "outcome_new_dial", "outcome_KDIGO_inc", "death_in_7d", "outcome_KDIGO_inc_or_death",  "outcome_max_crea_ratio", "outcome_max_crea_diff", "death_in_hosp", "drug") #"ph_htn", "ph_dm", "ph_chf", "ph_ckd", "Meropenem", "Doripenem", "Ertapenem", "los_icu", 
+
+comb_DF <- rbind(
+  read.csv("MDF_mimic3.csv") %>% mutate(dataset="MIMIC3", cardiac_surgery=T) %>% dplyr::select(SELECTS, hadm_id) %>% rename("ID"=hadm_id), 
+  read.csv("MDF_aumc.csv") %>% mutate(dataset="AUMC", ph_htn=NA, ph_dm=NA, ph_chf=NA, ph_ckd=NA) %>% dplyr::select(SELECTS, icustay_id) %>% rename("ID"=icustay_id) 
+  ) %>% 
+  rbind(
+  read.csv("MDF_miiv.csv") %>% mutate(dataset="miiv") %>% dplyr::select(SELECTS, hadm_id) %>% rename("ID"=hadm_id)
+  ) 
+
+comb_DF$base_KDIGO_dial <- ifelse(is.na(comb_DF$base_KDIGO_dial), F, 
+                                  ifelse(comb_DF$base_KDIGO_dial>0.5, T, F))
+comb_DF$dep_type2 <- ifelse(is.na(comb_DF$dep_type), "Non-surgery", ifelse(comb_DF$dep_type=="surg", "Surgery", "Non-surgery"))
+comb_DF$drug_type <- ifelse(comb_DF$drug_type=="IMI", "I/C", "NCC")
+comb_DF$sep3 <- ifelse(is.na(comb_DF$sep3), F, ifelse(comb_DF$sep3==T, T, F))
+comb_DF$drug01 <- ifelse(comb_DF$drug_type=="I/C", 1 , 0) #convert to 0/1 for matching
+comb_DF$drug10 <- ifelse(comb_DF$drug_type=="I/C", 0 , 1)
+comb_DF$drug_switch <- ifelse(comb_DF$time_switch_group<168, T, F)
+comb_DF$outcome_HDD_in7d <- ifelse(comb_DF$outcome_new_dial==T, T,
+                                   ifelse(comb_DF$death_in_7d==T, T, F))
+comb_DF$drug_name <- ifelse(grepl("relebactam", comb_DF$drug), "Imipenem/cilastatin/relebactam", 
+                      ifelse(grepl("rtapenem", comb_DF$drug), "Ertapenem",
+                       ifelse(grepl("Doripenem", comb_DF$drug), "Doripenem",
+                        ifelse(grepl("mipenem", comb_DF$drug), "Imipenem/cilastatin",
+                         ifelse(grepl("eropenem", comb_DF$drug), "Meropenem", F))))) %>% factor(levels = c("Imipenem/cilastatin", "Imipenem/cilastatin/relebactam","Meropenem", "Doripenem", "Ertapenem"))
+
+library(gtsummary) #install.packages("tableone")
+VARS <-c("dataset","age_group", "sex", "bmi",  "dep_type2", "drug_name","sofa", "qsofa", "sirs",  "pre_blood_culture", "treat_van","vasopressor", "ventilation","base_crea", "near_crea","base_KDIGO", "obs_period", "drug_switch","base_KDIGO_dial", "outcome_KDIGO_inc", "death_in_7d", "outcome_KDIGO_inc_or_death", "outcome_new_dial", "outcome_HDD_in7d") #"ph_htn", "ph_dm", "ph_chf", "ph_ckd", "sep3","los_icu", "death_in_hosp", "outcome_max_crea_ratio", "outcome_max_crea_diff"
+
+```
+
+```{r table one 2, warning=F, message=F}
+###Ppatietns with base_KDIGO 3 excluded.
+comb_DF2 <- comb_DF %>% filter(base_KDIGO<2.9)
+CONTIN <- c("qsofa", "sirs", "obs_period")
+l_list <- list(dep_type2~"ICU type", treat_van~"pre vancomycin use", vasopressor~"pre vasopressor use", ventilation~"pre ventilation", base_crea~"Baseline sCr", near_crea~"sCr at treatment start", base_KDIGO~"AKI stage at treatment start", obs_period~"observation time", drug_switch~"Cencsored with drug change", base_KDIGO_dial~"RRT at treatment start", outcome_KDIGO_inc~"O, AKI develop/progress", death_in_7d~"O, Death", outcome_KDIGO_inc_or_death~"O, AKI d/p or death", outcome_new_dial~"O, RRT-intervention", outcome_HDD_in7d~"O, Death or RRT-intervention")
+#MIMIC3 pts, base_KDIGO<2.9
+tbl_summary(comb_DF2 %>% subset(dataset=="MIMIC3"), by=drug_type, include = VARS, type = list(CONTIN ~ "continuous"), digits = list(all_categorical()~ 1, all_continuous() ~ 1), label = l_list) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**MIMIC-III, base_KDIGO<3**")
+
+#MIMIC4 pts, base_KDIGO<2.9
+tbl_summary(comb_DF2 %>% subset(dataset=="miiv"), by=drug_type, include = VARS, type = list(CONTIN~ "continuous"), digits = list(all_categorical()~ 1, all_continuous() ~ 1), label = l_list) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**MIMIC-IV, base_KDIGO<3**")
+
+#AUMC pts, base_KDIGO<2.9
+tbl_summary(comb_DF2 %>% subset(dataset=="AUMC"), by=drug_type, include = VARS, type = list(CONTIN ~ "continuous"), digits = list(all_categorical()~ 1, all_continuous() ~ 1), label = l_list) %>% modify_spanning_header(update = all_stat_cols() ~ "**AUMC, base_KDIGO<2.9**") %>% add_p(pvalue_fun = label_style_pvalue(digits = 2))
+```
+
+\_\_
+
+### 2. Matching by normal matching (Not used -\> Hidden)
+
+Next, backgrounds are adjusted using (normal) propensity score matching.
+Since normal matching cannot adjust the backgrounds enough in some
+datasets, [**results with such normal matching were not used for the
+manuscript.**]{.underline}
+
+#### 2a. Backgourns and outcome with (normal) propensity score matching (Hidden)
+
+```{r PSM, message=F, warning=F, include=F}
+FORMULA <- drug01 ~  age_cat + sex + dep_type2 + sirs + pre_blood_culture+ treat_van + vasopressor + base_crea + near_crea + base_KDIGO #+ dataset
+FORMULA0 <- drug01 ~ age_cat + sex + dep_type2 + sirs + pre_blood_culture+ treat_van + vasopressor + base_crea + near_crea + base_KDIGO 
+
+#PSM with MIMIC4
+matched_MIMIC4 <- matchit(data=comb_DF2 %>% subset(dataset=="miiv"), FORMULA0, method="nearest", caliper=0.2, distance="glm", link="logit", estimand="ATT", replace=F, ratio=1)
+matched_MIMIC4_DF <- matched_MIMIC4 %>% match.data()
+tbl_summary(matched_MIMIC4_DF, by=drug_type, include = c(VARS), type = list(CONTIN ~ "continuous"), label = l_list) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**PSM, MIMIC-IV")
+
+#PSM with MIMIC3
+matched_MIMIC3 <- matchit(data=comb_DF2 %>% subset(dataset=="MIMIC3"), FORMULA0, method="nearest", caliper=0.2, distance="glm", link="logit", estimand="ATT", replace=F, ratio=1)
+matched_MIMIC3_DF <- matched_MIMIC3 %>% match.data()
+tbl_summary(matched_MIMIC3_DF, by=drug_type, include = c(VARS), type = list(CONTIN ~ "continuous"), label = l_list) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**PSM, MIMIC-III**")
+
+#PSM with AUMC
+matched_AUMC <- matchit(data=comb_DF2 %>% subset(dataset=="AUMC"), FORMULA0, method="nearest", caliper=0.2, distance="glm", link="logit", estimand="ATT", replace=F, ratio=1)
+matched_AUMC_DF <- matched_AUMC %>% match.data()
+tbl_summary(matched_AUMC_DF, by=drug_type, include = c(VARS), type = list(CONTIN ~ "continuous"), label = l_list) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**PSM, AUMC**")
+```
+
+#### 2b. Visualize the quality of matching (Hidden. ROC were around 0.6, SMD were 0.15 at max)
+
+```{r checking PSM, message=F, warning=F, fig.height=4,fig.width=4, include=F}
+#Checking the matching quality
+
+#love.plot(matched, threshold=0.1, abs=T, line=T, stars="raw")+ggtitle("PO, all pts")+theme(legend.position="bottom")
+love.plot(matched_MIMIC3, threshold=0.1, abs=T, line=T, stars="raw")+ggtitle("PSM-SMD, MIMIC-III")+theme(legend.position="bottom")+xlim(c(0,0.5))
+love.plot(matched_MIMIC4, threshold=0.1, abs=T, line=T, stars="raw")+ggtitle("PSM-SMD, MIMIC-IV")+theme(legend.position="bottom")+xlim(c(0,0.5))
+love.plot(matched_AUMC, threshold=0.1, abs=T, line=T, stars="raw")+ggtitle("PSM-SMD, AUMC")+theme(legend.position="bottom")+xlim(c(0,0.5))
+
+#roc(matched$treat, matched$distance) %>% auc() %>% round(., digits = 2) %>% paste0("AUC (All data) = ", .)
+roc(matched_MIMIC3$treat, matched_MIMIC3$distance) %>% auc() %>% round(., digits = 2) %>% paste0("AUC (MIMIC3) = ", .)
+roc(matched_MIMIC4$treat, matched_MIMIC4$distance) %>% auc() %>% round(., digits = 2) %>% paste0("AUC (MIMIC4) = ", .)
+roc(matched_AUMC$treat, matched_AUMC$distance) %>% auc() %>% round(., digits = 2) %>% paste0("AUC (AUMC) = ", .)
+```
+
+#### 2c. check creatinine change before and after matching (Hidden)
+
+```{r checking crea change, message=F, warning=F}
+#creatinine change from 1st-penem (before PSM)
+creatinine_c <- readRDS("creatinine_c.rds")
+m4_crea4 <- readRDS("m4_crea4.rds")
+aumc_crea44 <- read_rds("aumc_crea4.rds") %>% left_join(., read.csv("MDF_aumc.csv") %>% dplyr::select(icustay_id, drug_type) %>% rename("admissionid"=icustay_id), by="admissionid")
+
+c0 <- ggplot(m4_crea4, aes(time_1stabx_to_crea, crea, color=drug_type))+theme_classic()+
+  geom_smooth()+xlim(c(-168, 168))+theme(legend.position = "bottom")+coord_cartesian(ylim = c(0.5, 2))+geom_vline(xintercept=0, linetype="dashed")+ggtitle("MIMIC4 w/o PSM")
+c1 <- ggplot(creatinine_c, aes(time_abx_to_Crea, creatinine, color=drug_type))+theme_classic()+
+  geom_smooth()+xlim(c(-168, 168))+theme(legend.position = "bottom")+coord_cartesian(ylim = c(0.5, 2))+geom_vline(xintercept=0, linetype="dashed")+ggtitle("MIMIC3 w/o PSM")
+c2 <- ggplot(aumc_crea44 %>% subset(!is.na(drug_type)), 
+       aes(time_abx_to_crea, crea, color=drug_type))+ theme_classic()+
+  geom_smooth()+xlim(c(-168, 168))+theme(legend.position = "bottom")+coord_cartesian(ylim = c(0.5, 2))+geom_vline(xintercept=0, linetype="dashed")+ggtitle("AUMC3 w/o PSM")
+gridExtra::grid.arrange(c0, c1, c2, nrow=1)
+
+
+#creatinine change from 1st-penem (after PSM)
+c3 <- ggplot(m4_crea4 %>% subset(hadm_id %in% matched_MIMIC4_DF$ID), aes(time_1stabx_to_crea, crea, color=drug_type))+theme_classic()+
+  geom_smooth()+xlim(c(-168, 168))+theme(legend.position = "bottom")+coord_cartesian(ylim = c(0.5, 2))+geom_vline(xintercept=0, linetype="dashed")+ggtitle("MIMIC4 w/ PSM")
+
+c4 <- ggplot(creatinine_c %>% subset(hadm_id %in% matched_MIMIC3_DF$ID) %>% rename("crea"=creatinine), aes(time_abx_to_Crea, crea, color=drug_type))+theme_classic()+geom_smooth()+xlim(c(-168, 168))+theme(legend.position = "bottom")+coord_cartesian(ylim = c(0.5, 2))+geom_vline(xintercept=0, linetype="dashed")+ggtitle("MIMIC3 w/ PSM")
+
+c5 <- ggplot(aumc_crea44 %>% subset(admissionid %in% matched_AUMC_DF$ID) %>% subset(!is.na(drug_type)), 
+       aes(time_abx_to_crea, crea, color=drug_type))+theme_classic()+
+  geom_smooth()+xlim(c(-168, 168))+theme(legend.position = "bottom")+coord_cartesian(ylim = c(0.5, 2))+geom_vline(xintercept=0, linetype="dashed")+ggtitle("AUMC3 w/ PSM")
+gridExtra::grid.arrange(c3, c4, c5, nrow=1)
+```
+
+####check some eGFR change for notes
+
+```{r checking crea change for supple, message=F, warning=F, fig.width=6, fig.height=5}
+library(ggrepel)
+for (i in c(14,54)) {
+data_n6 <- aumc_crea44 %>% group_by(admissionid) %>% summarise("count"=n()) %>% filter(count>5)
+data <- aumc_crea44 %>% subset(admissionid %in% data_n6$admissionid) %>% subset(admissionid %in% matched_AUMC_DF$ID)
+data_one_subject <- data %>% subset(admissionid == data$admissionid %>% unique() %>% .[i])
+ID <- data_one_subject$admissionid %>% unique()
+g<-ggplot(data_one_subject, aes(time_abx_to_crea, crea))+
+  theme_classic()+ 
+  geom_point()+geom_line()+
+  geom_text_repel(aes(label = round(crea, digits=1)))+
+  xlim(c(-180, 180))+scale_x_continuous(breaks=c(-168,0,48,168))+
+  labs(x="Time from the 1st carbapenem treatment (h)", y="Serum creatinine levels (mg/dL)")+
+  theme(legend.position = "none", axis.text.x =  element_text("ccc"))+
+  coord_cartesian(ylim = c(0, max(data_one_subject$crea)*1.2))+
+    geom_vline(xintercept=0, linetype="dashed", color="gray30")+
+    geom_vline(xintercept=-168, linetype="dashed", color="gray80")+
+      geom_vline(xintercept=48, linetype="dashed", color="gray80")+
+      geom_vline(xintercept=168, linetype="dashed", color="gray80")+
+  ggtitle(paste0(i," [ID:",ID, "], KDIGO by crea: ", data_one_subject$base_KDIGO_crea, " -> ", 
+                 max(data_one_subject %>% subset(time_abx_to_crea>0) %>% .$outcome_KDIGO_crea, na.rm = T), " (by max), HD_start: ", comb_DF2 %>% subset(ID %in% 3034) %>% .$outcome_new_dial %>% unique()))
+  print(g)
+  data_n6
+}
+
+#data %>% group_by(admissionid) %>% summarise(n())
+#data %>% subset(admissionid == data$admissionid %>% unique() %>% .[51])
+
+```
+
+\_\_
+
+### [**3. Overlap weighting**]{.underline}
+
+Propensity score for I/C group was calculated with age, sex, ICU type,
+SIRS, pre blood culture, pre vancomycin use, pre vasopressor use,
+baseline sCr, sCr at treatment start and AKI stage at treatment start.
+Then the overlap weighting was performed on each dataset based on the
+propensity scores.
+
+\_\_
+
+#### 3a. backgrounds and outcome development after overlap weighting
+
+```{r ovlp, message=F, warning=F}
+#OVERLAP_PSM
+library(WeightIt) #install.packages("WeightIt")
+library(PSweight) #install.packages("PSweight")
+library(survey) #install.packages("survey")
+comb_DF2ovl <- comb_DF2 %>% as.data.frame()# %>% subset(data=="MIMIC3")
+
+FORMULA_ovl <- drug01 ~ age_cat + sex  + dep_type2 + sirs + pre_blood_culture+ treat_van + vasopressor + base_crea + near_crea + base_KDIGO 
+FORMULA_ovl2 <- drug01 ~  age_cat + sex + dep_type2 + sirs + pre_blood_culture + treat_van + vasopressor + base_crea + near_crea +  base_KDIGO
+#dig2s <- c("outcome_max_crea_ratio", "outcome_max_crea_diff","base_crea", "near_crea")
+
+#Create function to do calculating PS, weighing, and showing table.
+OVLP<-function(DF0, FORM, TITLE, TITLE2){
+DF<-DF0  
+bal_ovlp <- PSweight::SumStat(ps.formula = FORM, data = DF, weight="overlap")
+ps_man <- glm(formula = FORM, data=DF, family = binomial) %>% .$fitted.values
+wgt_man <- DF %>% mutate(ps_for_IMI = ps_man, ovlp_wgt = case_when(drug01 == 1 ~ (1-ps_man), drug01 == 0 ~ ps_man))
+saveRDS(bal_ovlp, paste0("bal_ovlp", TITLE, ".rds"))
+saveRDS(wgt_man, paste0("wgt_man_", TITLE, ".rds"))
+
+svydesign(~1, data = wgt_man %>% as.data.frame(), weights = wgt_man$ovlp_wgt) %>% tbl_svysummary(include = VARS, by=drug_type, type = list(CONTIN ~ "continuous"), digits = list(all_categorical() ~ 1, all_continuous() ~ 1), label = l_list) %>% 
+  add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>%
+  modify_header(all_stat_cols() ~ "**{level}** N={style_number(n, scale = 1, digits = 1)}") %>% 
+  modify_spanning_header(update = all_stat_cols() ~ TITLE2)
+}
+```
+
+```{r ovlp results, warning=F, message=F}
+#1. overlap-PSM using MIMIC3
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"), FORMULA_ovl2, "Ovlp_MIMIC3", "**Ovlp, MIMIC-III, base_KDIGO<3**")
+
+#2. overlap-PSM using MIMIC4
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"), FORMULA_ovl2, "Ovlp_MIMIC4", "**Ovlp, MIMIC-IV, base_KDIGO<3**")
+
+#3. overlap-PSM using AUMC
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"), FORMULA_ovl2, "Ovlp_AUMC", "**Ovlp, AUMC, base_KDIGO<3**")
+
+
+#check smd using CreateTableOne package
+library(tableone)
+library(survey)
+library(dplyr)
+CreateTableOne(strata = "drug_type", data = readRDS("wgt_man_Ovlp_MIMIC3.rds")) %>% print(smd=T)
+```
+
+```{r check smd, include=F}
+weighted_design <- svydesign(
+  ids = ~1, 
+  data = readRDS("wgt_man_Ovlp_AUMC.rds"), 
+  weights = ~ovlp_wgt)
+
+weighted_table <- svyCreateTableOne(
+  strata = "drug_type", 
+  data = weighted_design)
+print(weighted_table, smd = TRUE, nonnormal = "age_cat")
+```
+
+\_\_
+
+#### 3b. checking matching/weighting quality
+
+```{r ovlp AUC, message=F, warning=F, fig.width=8, fig.height=6}
+#Checking ROC
+roc(readRDS("wgt_man_Ovlp_MIMIC3.rds")$treat, readRDS("wgt_man_Ovlp_MIMIC3.rds")$ps_for_IMI)%>%auc()%>%round(.,digits = 2)%>%paste0("ovlp_AUC (MIMIC-III) = ", .)
+roc(readRDS("wgt_man_Ovlp_MIMIC4.rds")$treat, readRDS("wgt_man_Ovlp_MIMIC4.rds")$ps_for_IMI)%>%auc()%>%round(.,digits = 2)%>%paste0("ovlp_AUC (MIMIC-IV) = ", .)
+roc(readRDS("wgt_man_Ovlp_AUMC.rds")$treat, readRDS("wgt_man_Ovlp_AUMC.rds")$ps_for_IMI) %>%auc()%>%round(., digits = 2)%>%paste0("ovlp_AUC (AUMC) = ", .)
+
+#Checking histogram of propensity score
+HISTO <- function(DF, TITLE, MARK){
+ggplot(DF, aes(ps_for_IMI, group = drug_type, fill=drug_type))+
+    geom_histogram(color="black", data = DF %>% subset(drug_type=="I/C"), aes(y=..count..))+
+    geom_histogram(color="black", data = DF %>% subset(drug_type!="I/C"), aes(y=-..count..))+
+    theme_classic()+
+    labs(title =  TITLE, x="Propensity score for I/C group", y="Counts")+
+    theme(plot.title = element_text(size = 14, hjust = 0), axis.title.x = element_text(size=10.5))}
+
+tiff("eFigure 1 (histogram).tif", res = 300, width = 8, height = 6, units = "in", compression = "lzw")
+gridExtra::grid.arrange(
+  HISTO(readRDS("wgt_man_Ovlp_MIMIC3.rds"), "(A) MIMIC-III"), 
+  HISTO(readRDS("wgt_man_Ovlp_MIMIC4.rds"), "(B) MIMIC-IV"),
+  HISTO(readRDS("wgt_man_Ovlp_AUMC.rds"), "(C) AUMC"), nrow=2)
+dev.off()
+
+#Checking SMD
+plot(readRDS("bal_ovlpOvlp_MIMIC3.rds"), type="balance", threshold=0.1)
+plot(readRDS("bal_ovlpOvlp_MIMIC4.rds"), type="balance")
+plot(readRDS("bal_ovlpOvlp_AUMC.rds"), type="balance")
+```
+
+\_
+
+#### 3c. Forest plot of the primary outcomes in each dataset and of overall result
+
+\_
+
+```{r ovlp OR, message=F}
+#calculating Odds ratio of I/C group in each dataset (not needed)
+library(forestplot)
+OVLP_OR <- function(DF, FORM, OUTCOME, TITLE){
+est_ovlp <- PSweight(ps.formula = FORM, yname = OUTCOME, data = DF, weight = "overlap")
+summary1 <- est_ovlp %>% summary(type="OR") %>% .$estimates %>% as.data.frame() %>% 
+  mutate(
+      OR = exp(Estimate),
+      LCI = exp(lwr),
+      UCI = exp(upr),
+      study = TITLE,
+      outcome = OUTCOME
+  )
+svy_design <- svydesign(~1, data = DF %>% as.data.frame(), weights = DF$ovlp_wgt)
+fmla <- as.formula(paste("~", OUTCOME))
+summary1 <- summary1 %>% mutate("pts"= svytable(fmla, svy_design) %>% as.data.frame() %>% .$Freq %>% sum(),
+                                "events"=svytable(fmla, svy_design) %>% as.data.frame() %>% filter(.data[[OUTCOME]]==T) %>% .$Freq %>% sum())
+summary1
+}
+```
+
+```{r ovlp FP2}
+#calculating Odds ratio of I/C group in each dataset
+FP2 <- function(RDS, FORM){
+OR_RES <- rbind(
+  OVLP_OR(readRDS(RDS), FORM, "outcome_KDIGO_inc_or_death", "AKI progression or death"),
+  OVLP_OR(readRDS(RDS), FORM, "outcome_KDIGO_inc", "AKI progression"),
+  OVLP_OR(readRDS(RDS), FORM, "outcome_new_dial", "Hemodialysis"),
+  OVLP_OR(readRDS(RDS), FORM, "death_in_7d", "Death"),
+  OVLP_OR(readRDS(RDS), FORM, "outcome_HDD_in7d", "Hemodialysis or death")) %>% 
+  mutate("events_percentage"=events/sum(.$event), "pts_percentage"=pts/sum(.$pts))
+saveRDS(OR_RES, paste0("ORRES_",RDS))
+}
+
+FP2("wgt_man_Ovlp_MIMIC4.rds", FORMULA_ovl2)
+FP2("wgt_man_Ovlp_MIMIC3.rds", FORMULA_ovl2)
+FP2("wgt_man_Ovlp_AUMC.rds", FORMULA_ovl2)
+```
+
+```{r ovlp then RMM, message=F, warning=F}
+#Pool the results of each dataset with Random Mixed effect meta-analysis
+METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC.rds") %>% mutate("dataset"="AUMC"))
+METADF_AKID <- METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+METADF_AKI <- METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+METADF_HD <- METADF0 %>% subset(outcome=="outcome_new_dial")
+METADF_D <- METADF0 %>% subset(outcome=="death_in_7d")
+METADF_HDD <- METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+
+library(metafor)
+METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = METADF_AKID)
+METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = METADF_AKI)
+METARES_HD <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = METADF_HD)
+METARES_D <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = METADF_D)
+METARES_HDD <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = METADF_HDD)
+
+METAF <- function(METARES, AAA, BBB, CCC, TITLE){
+metafor::forest(METARES,  atransf=exp, at=log(AAA), slab = dataset,
+       xlim=BBB,
+       ilab=cbind(round(pts, digits=1), round(events, digits=1)), 
+       ilab.lab=c("Subjects","Events"), ilab.pos = 2, ilab.xpos=CCC,
+       cex=0.85, header="", xlab="Odds ratio", mlab="Total (Random effects model)", shade=TRUE, 
+       main=TITLE, adj=0)
+}
+SCALEA1<-c(0.25, 1, 4)
+SCALEB1 <- c(-5,3)
+SCALEC1 <- c(-2.5,-1.5)
+#
+METAF(METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "AKI development/progression")
+METARES_AKI #details of the overall analysis results
+METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+tiff("Figure 2 (primary).tif", res = 300, width = 6, height = 4, units = "in", compression = "lzw")
+METAF(METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "AKI development/progression")
+dev.off()
+
+METAF(METARES_AKID, SCALEA1, SCALEB1, SCALEC1, "AKI development/progression or death")
+tiff("eFigure 3 (sensitivity).tif", res = 300, width = 6, height = 4, units = "in", compression = "lzw")
+METAF(METARES_AKID, SCALEA1, SCALEB1, SCALEC1, "AKI development/progression or death")
+dev.off()
+METARES_AKID
+METADF_AKID %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames() 
+```
+
+#### 3d. Forest plot of the secondary outcomes
+
+```{r secondaries, message=F, warning=F}
+SCALEA2<-c(0.1, 0.5, 1, 2)
+SCALEB2 <- c(-8,3)
+SCALEC2 <- c(-4.3,-2.8)
+METAF(METARES_HD, SCALEA2, SCALEB2, SCALEC2, "(A) RRT-intervention")
+METARES_HD
+METADF_HD %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+SCALEA3<-c(0.25, 1, 4)
+SCALEB3 <- c(-7,3.5)
+SCALEC3 <- c(-3.5,-2)
+METAF(METARES_D, SCALEA3, SCALEB3, SCALEC3, "(B) Death")
+METARES_D
+METADF_D %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+SCALEA3<-c(0.25, 1, 4)
+SCALEB3 <- c(-7,3.5)
+SCALEC3 <- c(-3.5,-2)
+METAF(METARES_HDD, SCALEA3, SCALEB3, SCALEC3, "(C) RRT-intervention or death")
+METARES_HDD
+METADF_HDD %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+#export
+tiff("Figure 3 (secondary).tif", 
+     width = 5, 
+     height = 7,     # Tall file to fit 3 plots vertically
+     units = "in", 
+     res = 300, 
+     compression = "lzw")
+par(mfrow = c(3, 1))
+METAF(METARES_HD, SCALEA2, SCALEB2, SCALEC2, "(A) RRT-intervention")
+METAF(METARES_D, SCALEA3, SCALEB3, SCALEC3, "(B) Death")
+METAF(METARES_HDD, SCALEA3, SCALEB3, SCALEC3, "(C) RRT-intervention or death")
+dev.off()
+```
+
+\_\_
+
+\_\_
+
+### [**4. Stratified analysis**]{.underline}
+
+[**Stratified by AKI stage at treatment start (stage 0 vs stage
+1or2)**]{.underline}
+
+Stratify first, then calculate propensity score and perform overlap
+weighting.
+
+\_\_
+
+#### 4a. Background and outcome in subgroups before matching.
+
+```{r stratified before PSOW w/o AKI, message=F, warning=F}
+###base_KDIGO=0 before PSOW
+#MIMIC3
+#tbl_summary(comb_DF2 %>% subset(dataset=="MIMIC3"&base_KDIGO==0), by=drug_type, include = c(VARS, outcome_KDIGO_inc), type = list(qsofa ~ "continuous", sirs~ "continuous")) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**MIMIC-III, base_KDIGO=0**")
+#MIMIC4
+#tbl_summary(comb_DF2 %>% subset(dataset=="miiv"&base_KDIGO==0), by=drug_type, include = c(VARS, outcome_KDIGO_inc), type = list(qsofa ~ "continuous", sirs~ "continuous")) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**MIMIC-IV, base_KDIGO=0**")
+#AUMC
+#tbl_summary(comb_DF2 %>% subset(dataset=="AUMC"&base_KDIGO==0), by=drug_type, include = c(VARS, outcome_KDIGO_inc), type = list(qsofa ~ "continuous", sirs~ "continuous")) %>% modify_spanning_header(update = all_stat_cols() ~ "**AUMC, base_KDIGO=0**") %>% add_p(pvalue_fun = label_style_pvalue(digits = 2))
+```
+
+\_\_
+
+#### 4b. Background and outcome among those [with AKI at treatment start]{.underline} before matching (Hidden).
+
+```{r stratified before PSOW with AKI, message=F, warning=F}
+###base_KDIGO=1or2 before PSOW
+#MIMIC3
+#tbl_summary(comb_DF2 %>% subset(dataset=="MIMIC3"&base_KDIGO!=0), by=drug_type, include = c(VARS, outcome_KDIGO_inc), type = list(qsofa ~ "continuous", sirs~ "continuous")) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**MIMIC-III, base_KDIGO=1,2**")
+#MIMIC4
+#tbl_summary(comb_DF2 %>% subset(dataset=="miiv"&base_KDIGO!=0), by=drug_type, include = c(VARS, outcome_KDIGO_inc), type = list(qsofa ~ "continuous", sirs~ "continuous")) %>% add_p(pvalue_fun = label_style_pvalue(digits = 2)) %>% modify_spanning_header(update = all_stat_cols() ~ "**MIMIC-IV, base_KDIGO=1,2**")
+#AUMC
+#tbl_summary(comb_DF2 %>% subset(dataset=="AUMC"&base_KDIGO!=0), by=drug_type, include = c(VARS, outcome_KDIGO_inc), type = list(qsofa ~ "continuous", sirs~ "continuous")) %>% modify_spanning_header(update = all_stat_cols() ~ "**AUMC, base_KDIGO=1,2**") %>% add_p(pvalue_fun = label_style_pvalue(digits = 2))
+```
+
+\_\_
+
+#### 4c. Backgrounds, outcomes, matching quality, and forrest plot among those [without AKI]{.underline} [at treatment start.]{.underline}
+
+```{r stratified ovlp base_KDIGO0, message=F, warning=F}
+#3. overlap-PSM using MIMIC3, base KDIGO=0
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&base_KDIGO==0), FORMULA_ovl2, "Ovlp_MIMIC3_base0", "**Ovlp, MIMIC-III, base_KDIGO=0**")
+#2. overlap-PSM using MIMIC4, base KDIGO=0
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&base_KDIGO==0), FORMULA_ovl2, "Ovlp_MIMIC4_base0", "**Ovlp, MIMIC-IV, base_KDIGO=0**")
+#3. overlap-PSM using AUMC, base KDIGO=0
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&base_KDIGO==0), FORMULA_ovl2, "Ovlp_AUMC_base0", paste0("**Ovlp, AUMC", ", base_KDIGO=0**"))
+
+#ROC
+roc(readRDS("wgt_man_Ovlp_MIMIC3_base0.rds")$treat, readRDS("wgt_man_Ovlp_MIMIC3_base0.rds")$ps_for_IMI)%>%auc()%>%round(.,digits = 2)%>%paste0("ovlp_AUC base 0 (MIMIC3) = ", .)
+roc(readRDS("wgt_man_Ovlp_MIMIC4_base0.rds")$treat, readRDS("wgt_man_Ovlp_MIMIC4_base0.rds")$ps_for_IMI)%>%auc()%>%round(.,digits = 2)%>%paste0("ovlp_AUC base 0 (MIMIC4) = ", .)
+roc(readRDS("wgt_man_Ovlp_AUMC_base0.rds")$treat, readRDS("wgt_man_Ovlp_AUMC_base0.rds")$ps_for_IMI) %>%auc()%>%round(., digits = 2)%>%paste0("ovlp_AUC base 0 (AUMC) = ", .)
+
+#histogram
+gridExtra::grid.arrange(
+HISTO(readRDS("wgt_man_Ovlp_MIMIC3_base0.rds"), "MIMIC-III, base KDIGO=0"),
+HISTO(readRDS("wgt_man_Ovlp_MIMIC4_base0.rds"), "MIMIC-IV, base KDIGO=0"),
+HISTO(readRDS("wgt_man_Ovlp_AUMC_base0.rds"), "AUMC, base KDIGO=0"), nrow=2)
+
+#Forrestplot
+FP2("wgt_man_Ovlp_MIMIC3_base0.rds", FORMULA_ovl2)
+FP2("wgt_man_Ovlp_MIMIC4_base0.rds", FORMULA_ovl2)
+FP2("wgt_man_Ovlp_AUMC_base0.rds", FORMULA_ovl2)
+
+
+
+#
+base0_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_base0.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_base0.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_base0.rds") %>% mutate("dataset"="AUMC"))
+base0_METADF_AKID <- base0_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+base0_METADF_AKI <- base0_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+base0_METADF_HD <- base0_METADF0 %>% subset(outcome=="outcome_new_dial")
+base0_METADF_D <- base0_METADF0 %>% subset(outcome=="death_in_7d")
+base0_METADF_HDD <- base0_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+base0_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = base0_METADF_AKID)
+base0_METARES_AKI<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = base0_METADF_AKI)
+base0_METARES_HD<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = base0_METADF_HD)
+base0_METARES_D<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = base0_METADF_D)
+base0_METARES_HDD<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = base0_METADF_HDD)
+
+METAF(base0_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development (without AKI at treatment start)")
+base0_METARES_AKI
+base0_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+METAF(base0_METARES_AKID, SCALEA1, SCALEB1, SCALEC1, "AKI development or death (without AKI at treatment start)")
+base0_METARES_AKID
+base0_METADF_AKID %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+METAF(base0_METARES_HD, SCALEA1, SCALEB1, SCALEC1, "(X) RRT-intervention (without AKI at treatment start)")
+base0_METARES_HD
+base0_METADF_HD %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+METAF(base0_METARES_D, SCALEA1, SCALEB1, SCALEC1, "(B) Death (without AKI at treatment start)")
+base0_METARES_D
+base0_METADF_D %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+METAF(base0_METARES_HDD, SCALEA1, SCALEB1, SCALEC1, "(C) RRT-intervention or death (without AKI at treatment start)")
+base0_METARES_HDD
+base0_METADF_HDD %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+#### 4d. Backgrounds, outcomes, matching quality, and forest plot among those [**with AKI** at treatment start.]{.underline}
+
+```{r stratified ovlp base_KDIGO12, message=F, warning=F}
+#1. overlap-PSM using MIMIC3, base KDIGO=0
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&base_KDIGO>0.1&base_KDIGO<3), FORMULA_ovl2, "Ovlp_MIMIC3_base12", "**Ovlp, MIMIC-III, base_KDIGO 1,2**")
+#2. overlap-PSM using MIMIC4, base KDIGO=0
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&base_KDIGO>0.1&base_KDIGO<3), FORMULA_ovl2, "Ovlp_MIMIC4_base12", "**Ovlp, MIMIC-IV, base_KDIGO 1,2**")
+#3. overlap-PSM using AUMC, base KDIGO=0
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&base_KDIGO>0.1&base_KDIGO<3), FORMULA_ovl2, "Ovlp_AUMC_base12", "**Ovlp, AUMC, base_KDIGO 1,2**")
+
+#ROC
+roc(readRDS("wgt_man_Ovlp_MIMIC3_base12.rds")$treat, readRDS("wgt_man_Ovlp_MIMIC3_base12.rds")$ps_for_IMI)%>%auc()%>%round(.,digits = 2)%>%paste0("ovlp_AUC base 1,2 (MIMIC3) = ", .)
+roc(readRDS("wgt_man_Ovlp_MIMIC4_base12.rds")$treat, readRDS("wgt_man_Ovlp_MIMIC4_base12.rds")$ps_for_IMI)%>%auc()%>%round(.,digits = 2)%>%paste0("ovlp_AUC base 1,2 (MIMIC4) = ", .)
+roc(readRDS("wgt_man_Ovlp_AUMC_base12.rds")$treat, readRDS("wgt_man_Ovlp_AUMC_base12.rds")$ps_for_IMI) %>%auc()%>%round(., digits = 2)%>%paste0("ovlp_AUC base 1,2 (AUMC) = ", .)
+
+#histogram
+HISTO(readRDS("wgt_man_Ovlp_MIMIC4_base12.rds"), "MIMIC4, base KDIGO=1,2")
+HISTO(readRDS("wgt_man_Ovlp_MIMIC3_base12.rds"), "MIMIC3, base KDIGO=1,2")
+HISTO(readRDS("wgt_man_Ovlp_AUMC_base12.rds"), "AUMC, base KDIGO=1,2")
+
+FP2("wgt_man_Ovlp_MIMIC4_base12.rds", FORMULA_ovl2)
+FP2("wgt_man_Ovlp_MIMIC3_base12.rds", FORMULA_ovl2)
+FP2("wgt_man_Ovlp_AUMC_base12.rds", FORMULA_ovl2)
+
+base12_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_base12.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_base12.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_base12.rds") %>% mutate("dataset"="AUMC"))
+base12_METADF_AKID <- base12_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+base12_METADF_AKI <- base12_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+base12_METADF_HD <- base12_METADF0 %>% subset(outcome=="outcome_new_dial")
+base12_METADF_D <- base12_METADF0 %>% subset(outcome=="death_in_7d")
+base12_METADF_HDD <- base12_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+base12_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = base12_METADF_AKID)
+base12_METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = base12_METADF_AKI)
+base12_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = base12_METADF_HD)
+base12_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = base12_METADF_D)
+base12_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = base12_METADF_HDD)
+
+METAF(base12_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(X) AKI progression (with AKI at treatment start)")
+base12_METARES_AKI
+base12_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+METAF(base12_METARES_AKID, SCALEA1, SCALEB1, SCALEC1, "AKI progression or death (with AKI at treatment start)")
+base12_METARES_AKID
+base12_METADF_AKID %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+METAF(base12_METARES_HD, SCALEA1, SCALEB1, SCALEC1, "(X) RRT-intervention (with AKI at treatment start)")
+base12_METARES_HD
+base12_METADF_HD %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+METAF(base12_METARES_D, SCALEA1, SCALEB1, SCALEC1, "(B) Death (with AKI at treatment start)")
+base12_METARES_D
+base12_METADF_D %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+
+METAF(base12_METARES_HDD, SCALEA1, SCALEB1, SCALEC1, "(C) RRT-intervention or death (with AKI at treatment start)")
+base12_METARES_HDD
+base12_METADF_HDD %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+
+\_\_
+
+#### 5c. Backgrounds, outcomes, matching quality, and forrest plot among those [**males**]{.underline} [at treatment start.]{.underline}
+
+```{r stratified ovlp males, message=F, warning=F}
+
+FORMULA_ovl2_sex <- drug01 ~  age_cat + dep_type2 + sirs + pre_blood_culture + treat_van + vasopressor + base_crea + near_crea +  base_KDIGO
+
+#1. overlap-PSM using MIMIC3, "Male"
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&sex=="Male"), FORMULA_ovl2_sex, "Ovlp_MIMIC3_Male", "**Ovlp, MIMIC-III, Male**")
+#2. overlap-PSM using MIMIC4, "Male"
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&sex=="Male"), FORMULA_ovl2_sex, "Ovlp_MIMIC4_Male", "**Ovlp, MIMIC-IV, Male**")
+#3. overlap-PSM using AUMC, "Male"
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&sex=="Male"), FORMULA_ovl2_sex, "Ovlp_AUMC_Male", paste0("**Ovlp, AUMC", ", Male**"))
+
+#Forrestplot
+FP2("wgt_man_Ovlp_MIMIC3_Male.rds", FORMULA_ovl2_sex)
+FP2("wgt_man_Ovlp_MIMIC4_Male.rds", FORMULA_ovl2_sex)
+FP2("wgt_man_Ovlp_AUMC_Male.rds", FORMULA_ovl2_sex)
+
+Male_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_Male.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_Male.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_Male.rds") %>% mutate("dataset"="AUMC"))
+Male_METADF_AKID <- Male_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+Male_METADF_AKI <- Male_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+Male_METADF_HD <- Male_METADF0 %>% subset(outcome=="outcome_new_dial")
+Male_METADF_D <- Male_METADF0 %>% subset(outcome=="death_in_7d")
+Male_METADF_HDD <- Male_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+Male_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Male_METADF_AKID)
+Male_METARES_AKI<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Male_METADF_AKI)
+Male_METARES_HD<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Male_METADF_HD)
+Male_METARES_D<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Male_METADF_D)
+Male_METARES_HDD<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Male_METADF_HDD)
+
+METAF(Male_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (Male)")
+Male_METARES_AKI
+Male_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+#### 5d. Backgrounds, outcomes, matching quality, and forest plot among those [**Female**]{.underline}
+
+```{r stratified ovlp female, message=F, warning=F}
+#1. overlap-PSM using MIMIC3, Female
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&sex=="Female"), FORMULA_ovl2_sex, "Ovlp_MIMIC3_Female", "**Ovlp, MIMIC-III, Female**")
+#2. overlap-PSM using MIMIC4, Female
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&sex=="Female"), FORMULA_ovl2_sex, "Ovlp_MIMIC4_Female", "**Ovlp, MIMIC-IV, Female**")
+#3. overlap-PSM using AUMC, Female
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&sex=="Female"), FORMULA_ovl2_sex, "Ovlp_AUMC_Female", "**Ovlp, AUMC, Female**")
+
+FP2("wgt_man_Ovlp_MIMIC4_Female.rds", FORMULA_ovl2_sex)
+FP2("wgt_man_Ovlp_MIMIC3_Female.rds", FORMULA_ovl2_sex)
+FP2("wgt_man_Ovlp_AUMC_Female.rds", FORMULA_ovl2_sex)
+
+Female_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_Female.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_Female.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_Female.rds") %>% mutate("dataset"="AUMC"))
+Female_METADF_AKID <- Female_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+Female_METADF_AKI <- Female_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+Female_METADF_HD <- Female_METADF0 %>% subset(outcome=="outcome_new_dial")
+Female_METADF_D <- Female_METADF0 %>% subset(outcome=="death_in_7d")
+Female_METADF_HDD <- Female_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+Female_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Female_METADF_AKID)
+Female_METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Female_METADF_AKI)
+Female_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Female_METADF_HD)
+Female_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Female_METADF_D)
+Female_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Female_METADF_HDD)
+
+METAF(Female_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (Female)")
+Female_METARES_AKI
+Female_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+#### 6c. Backgrounds, outcomes, matching quality, and forrest plot among those [**younger**]{.underline} [at treatment start.]{.underline}
+
+```{r stratified ovlp young, message=F, warning=F}
+
+FORMULA_ovl2_age <- drug01 ~  sex + dep_type2 + sirs + pre_blood_culture + treat_van + vasopressor + base_crea + near_crea +  base_KDIGO
+comb_DF2ovl %>%dplyr::select(age_cat, age_group) %>% unique()
+#1. overlap-PSM using MIMIC3, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&age_cat<59), FORMULA_ovl2_age, "Ovlp_MIMIC3_Young", "**Ovlp, MIMIC-III, Young**")
+#2. overlap-PSM using MIMIC4, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&age_cat<59), FORMULA_ovl2_age, "Ovlp_MIMIC4_Young", "**Ovlp, MIMIC-IV, Young**")
+#3. overlap-PSM using AUMC, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&age_cat<59), FORMULA_ovl2_age, "Ovlp_AUMC_Young", paste0("**Ovlp, AUMC, Young**"))
+
+#Forrestplot
+FP2("wgt_man_Ovlp_MIMIC3_Young.rds", FORMULA_ovl2_age)
+FP2("wgt_man_Ovlp_MIMIC4_Young.rds", FORMULA_ovl2_age)
+FP2("wgt_man_Ovlp_AUMC_Young.rds", FORMULA_ovl2_age)
+
+Young_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_Young.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_Young.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_Young.rds") %>% mutate("dataset"="AUMC"))
+Young_METADF_AKID <- Young_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+Young_METADF_AKI <- Young_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+Young_METADF_HD <- Young_METADF0 %>% subset(outcome=="outcome_new_dial")
+Young_METADF_D <- Young_METADF0 %>% subset(outcome=="death_in_7d")
+Young_METADF_HDD <- Young_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+Young_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Young_METADF_AKID)
+Young_METARES_AKI<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Young_METADF_AKI)
+Young_METARES_HD<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Young_METADF_HD)
+Young_METARES_D<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Young_METADF_D)
+Young_METARES_HDD<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Young_METADF_HDD)
+
+METAF(Young_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (younger than 60 years)")
+Young_METARES_AKI
+Young_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+\_\_
+
+#### 6d. Backgrounds, outcomes, matching quality, and forest plot among those [**Older**]{.underline}
+
+```{r stratified ovlp Old, message=F, warning=F}
+#1. overlap-PSM using MIMIC3, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&age_cat>58), FORMULA_ovl2_age, "Ovlp_MIMIC3_Old", "**Ovlp, MIMIC-III, Old**")
+#2. overlap-PSM using MIMIC4, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&age_cat>58), FORMULA_ovl2_age, "Ovlp_MIMIC4_Old", "**Ovlp, MIMIC-IV, Old**")
+#3. overlap-PSM using AUMC, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&age_cat>58), FORMULA_ovl2_age, "Ovlp_AUMC_Old", "**Ovlp, AUMC, Old**")
+
+FP2("wgt_man_Ovlp_MIMIC4_Old.rds", FORMULA_ovl2_age)
+FP2("wgt_man_Ovlp_MIMIC3_Old.rds", FORMULA_ovl2_age)
+FP2("wgt_man_Ovlp_AUMC_Old.rds", FORMULA_ovl2_age)
+
+Old_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_Old.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_Old.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_Old.rds") %>% mutate("dataset"="AUMC"))
+Old_METADF_AKID <- Old_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+Old_METADF_AKI <- Old_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+Old_METADF_HD <- Old_METADF0 %>% subset(outcome=="outcome_new_dial")
+Old_METADF_D <- Old_METADF0 %>% subset(outcome=="death_in_7d")
+Old_METADF_HDD <- Old_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+Old_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Old_METADF_AKID)
+Old_METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Old_METADF_AKI)
+Old_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Old_METADF_HD)
+Old_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Old_METADF_D)
+Old_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Old_METADF_HDD)
+
+METAF(Old_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (older than 59 years)")
+Old_METARES_AKI
+Old_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+
+\_\_
+
+#### 7c. Backgrounds, outcomes, matching quality, and forrest plot among those [**vancomycin**]{.underline} [at treatment start.]{.underline}
+
+```{r stratified ovlp vanco, message=F, warning=F}
+
+FORMULA_ovl2_vc <- drug01 ~  age_cat + sex + dep_type2 + sirs + pre_blood_culture + vasopressor + base_crea + near_crea +  base_KDIGO
+
+#1. overlap-PSM using MIMIC3, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&treat_van==T), FORMULA_ovl2_vc, "Ovlp_MIMIC3_vc", "**Ovlp, MIMIC-III, Vancomycin_treated**")
+#2. overlap-PSM using MIMIC4, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&treat_van==T), FORMULA_ovl2_vc, "Ovlp_MIMIC4_vc", "**Ovlp, MIMIC-IV, Vancomycin_treated**")
+#3. overlap-PSM using AUMC, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&treat_van==T), FORMULA_ovl2_vc, "Ovlp_AUMC_vc", paste0("**Ovlp, AUMC, Vancomycin_treated**"))
+
+#Forrestplot
+FP2("wgt_man_Ovlp_MIMIC3_vc.rds", FORMULA_ovl2_vc)
+FP2("wgt_man_Ovlp_MIMIC4_vc.rds", FORMULA_ovl2_vc)
+FP2("wgt_man_Ovlp_AUMC_vc.rds", FORMULA_ovl2_vc)
+
+vc_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_vc.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_vc.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_vc.rds") %>% mutate("dataset"="AUMC"))
+vc_METADF_AKID <- vc_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+vc_METADF_AKI <- vc_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+vc_METADF_HD <- vc_METADF0 %>% subset(outcome=="outcome_new_dial")
+vc_METADF_D <- vc_METADF0 %>% subset(outcome=="death_in_7d")
+vc_METADF_HDD <- vc_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+vc_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = vc_METADF_AKID)
+vc_METARES_AKI<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = vc_METADF_AKI)
+vc_METARES_HD<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = vc_METADF_HD)
+vc_METARES_D<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = vc_METADF_D)
+vc_METARES_HDD<-rma(yi = Estimate, sei = Std.Error, method = "REML", data = vc_METADF_HDD)
+
+METAF(vc_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (Treated with vancomycin)")
+vc_METARES_AKI
+vc_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+\_\_
+
+#### 7d. Backgrounds, outcomes, matching quality, and forest plot among those [**no_vancomycin**]{.underline}
+
+```{r stratified ovlp no vanco, message=F, warning=F}
+#1. overlap-PSM using MIMIC3, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&treat_van==F), FORMULA_ovl2_vc, "Ovlp_MIMIC3_novc", "**Ovlp, MIMIC-III, No_vancomycin**")
+#2. overlap-PSM using MIMIC4, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&treat_van==F), FORMULA_ovl2_vc, "Ovlp_MIMIC4_novc", "**Ovlp, MIMIC-IV, No_vancomycin**")
+#3. overlap-PSM using AUMC, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&treat_van==F), FORMULA_ovl2_vc, "Ovlp_AUMC_novc", "**Ovlp, AUMC, No_vancomycin**")
+
+FP2("wgt_man_Ovlp_MIMIC4_novc.rds", FORMULA_ovl2_vc)
+FP2("wgt_man_Ovlp_MIMIC3_novc.rds", FORMULA_ovl2_vc)
+FP2("wgt_man_Ovlp_AUMC_novc.rds", FORMULA_ovl2_vc)
+
+novc_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_novc.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_novc.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_novc.rds") %>% mutate("dataset"="AUMC"))
+novc_METADF_AKID <- novc_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+novc_METADF_AKI <- novc_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+novc_METADF_HD <- novc_METADF0 %>% subset(outcome=="outcome_new_dial")
+novc_METADF_D <- novc_METADF0 %>% subset(outcome=="death_in_7d")
+novc_METADF_HDD <- novc_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+novc_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = novc_METADF_AKID)
+novc_METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = novc_METADF_AKI)
+novc_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = novc_METADF_HD)
+novc_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = novc_METADF_D)
+novc_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = novc_METADF_HDD)
+
+METAF(novc_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (No vancomycin)")
+novc_METARES_AKI
+novc_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+
+
+\_\_
+
+#### 8c. Backgrounds, outcomes, matching quality, and forrest plot among those [**Surgery care unit**]{.underline} [at treatment start.]{.underline}
+
+```{r stratified ovlp surgery, message=F, warning=F}
+FORMULA_ovl2_surg <- drug01 ~  age_cat + sex + sirs + pre_blood_culture + treat_van + vasopressor + base_crea + near_crea +  base_KDIGO
+
+#1. overlap-PSM using MIMIC3, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&dep_type2=="Surgery"), FORMULA_ovl2_surg, "Ovlp_MIMIC3_surg", "**Ovlp, MIMIC-III, Surgical unit**")
+#2. overlap-PSM using MIMIC4, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&dep_type2=="Surgery"), FORMULA_ovl2_surg, "Ovlp_MIMIC4_surg", "**Ovlp, MIMIC-IV, Surgical unit**")
+#3. overlap-PSM using AUMC, "Young"
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&dep_type2=="Surgery"), FORMULA_ovl2_surg, "Ovlp_AUMC_surg", paste0("**Ovlp, AUMC, Surgical unit**"))
+
+#Forrestplot
+FP2("wgt_man_Ovlp_MIMIC3_surg.rds", FORMULA_ovl2_surg)
+FP2("wgt_man_Ovlp_MIMIC4_surg.rds", FORMULA_ovl2_surg)
+FP2("wgt_man_Ovlp_AUMC_surg.rds", FORMULA_ovl2_surg)
+
+surg_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_surg.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_surg.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_surg.rds") %>% mutate("dataset"="AUMC"))
+surg_METADF_AKID <- surg_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+surg_METADF_AKI <- surg_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+surg_METADF_HD <- surg_METADF0 %>% subset(outcome=="outcome_new_dial")
+surg_METADF_D <- surg_METADF0 %>% subset(outcome=="death_in_7d")
+surg_METADF_HDD <- surg_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+surg_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = surg_METADF_AKID)
+surg_METARES_AKI <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = surg_METADF_AKI)
+surg_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = surg_METADF_HD)
+surg_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = surg_METADF_D)
+surg_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = surg_METADF_HDD)
+
+METAF(surg_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (Surgical unit)")
+surg_METARES_AKI
+surg_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+\_\_
+
+#### 8d. Backgrounds, outcomes, matching quality, and forest plot among those [**non-srugery**]{.underline}
+
+```{r stratified ovlp non-surgery, message=F, warning=F}
+#1. overlap-PSM using MIMIC3, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&dep_type2=="Non-surgery"), FORMULA_ovl2_surg, "Ovlp_MIMIC3_nonsurg", "**Ovlp, MIMIC-III, Non-surgical unit**")
+#2. overlap-PSM using MIMIC4, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&dep_type2=="Non-surgery"), FORMULA_ovl2_surg, "Ovlp_MIMIC4_nonsurg", "**Ovlp, MIMIC-IV, Non-surgical unit**")
+#3. overlap-PSM using AUMC, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&dep_type2=="Non-surgery"), FORMULA_ovl2_surg, "Ovlp_AUMC_nonsurg", "**Ovlp, AUMC, Non-surgical unit**")
+
+FP2("wgt_man_Ovlp_MIMIC4_nonsurg.rds", FORMULA_ovl2_surg)
+FP2("wgt_man_Ovlp_MIMIC3_nonsurg.rds", FORMULA_ovl2_surg)
+FP2("wgt_man_Ovlp_AUMC_nonsurg.rds", FORMULA_ovl2_surg)
+
+nonsurg_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_nonsurg.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_nonsurg.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_nonsurg.rds") %>% mutate("dataset"="AUMC"))
+nonsurg_METADF_AKID <- nonsurg_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+nonsurg_METADF_AKI <- nonsurg_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+nonsurg_METADF_HD <- nonsurg_METADF0 %>% subset(outcome=="outcome_new_dial")
+nonsurg_METADF_D <- nonsurg_METADF0 %>% subset(outcome=="death_in_7d")
+nonsurg_METADF_HDD <- nonsurg_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+nonsurg_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonsurg_METADF_AKID)
+nonsurg_METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonsurg_METADF_AKI)
+nonsurg_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonsurg_METADF_HD)
+nonsurg_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonsurg_METADF_D)
+nonsurg_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonsurg_METADF_HDD)
+
+METAF(nonsurg_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (Non-surgical unit)")
+nonsurg_METARES_AKI
+nonsurg_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+
+\_\_
+
+#### 9c. Backgrounds, outcomes, matching quality, and forrest plot among those [**pre bood culture**]{.underline} [at treatment start.]{.underline}
+
+```{r stratified ovlp blood culture, message=F, warning=F}
+FORMULA_ovl2_bc <- drug01 ~  age_cat + sex + sirs + dep_type2 + treat_van + vasopressor + base_crea + near_crea +  base_KDIGO
+#1. overlap-PSM using MIMIC3, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&pre_blood_culture==T), FORMULA_ovl2_bc, "Ovlp_MIMIC3_bc", "**Ovlp, MIMIC-III, pre BC**")
+#2. overlap-PSM using MIMIC4, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&pre_blood_culture==T), FORMULA_ovl2_bc, "Ovlp_MIMIC4_bc", "**Ovlp, MIMIC-IV, pre BC**")
+#3. overlap-PSM using AUMC, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&pre_blood_culture==T), FORMULA_ovl2_bc, "Ovlp_AUMC_bc", "**Ovlp, AUMC, pre BC**")
+
+#Forrestplot
+FP2("wgt_man_Ovlp_MIMIC3_bc.rds", FORMULA_ovl2_bc)
+FP2("wgt_man_Ovlp_MIMIC4_bc.rds", FORMULA_ovl2_bc)
+FP2("wgt_man_Ovlp_AUMC_bc.rds", FORMULA_ovl2_bc)
+
+bc_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_bc.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_bc.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_bc.rds") %>% mutate("dataset"="AUMC"))
+bc_METADF_AKID <- bc_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+bc_METADF_AKI <- bc_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+bc_METADF_HD <- bc_METADF0 %>% subset(outcome=="outcome_new_dial")
+bc_METADF_D <- bc_METADF0 %>% subset(outcome=="death_in_7d")
+bc_METADF_HDD <- bc_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+bc_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = bc_METADF_AKID)
+bc_METARES_AKI <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = bc_METADF_AKI)
+bc_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = bc_METADF_HD)
+bc_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = bc_METADF_D)
+bc_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = bc_METADF_HDD)
+
+METAF(bc_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (with blood culture)")
+bc_METARES_AKI
+bc_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+\_\_
+
+#### 9d. Backgrounds, outcomes, matching quality, and forest plot among those [**non-blood culture**]{.underline}
+
+```{r stratified ovlp non-bc, message=F, warning=F}
+#1. overlap-PSM using MIMIC3, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&pre_blood_culture==F), FORMULA_ovl2_bc, "Ovlp_MIMIC3_nonbc", "**Ovlp, MIMIC-III, Non-BC**")
+#2. overlap-PSM using MIMIC4, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&pre_blood_culture==F), FORMULA_ovl2_bc, "Ovlp_MIMIC4_nonbc", "**Ovlp, MIMIC-IV, Non-BC**")
+#3. overlap-PSM using AUMC, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&pre_blood_culture==F), FORMULA_ovl2_bc, "Ovlp_AUMC_nonbc", "**Ovlp, AUMC, Non-BC**")
+
+FP2("wgt_man_Ovlp_MIMIC4_nonbc.rds", FORMULA_ovl2_bc)
+FP2("wgt_man_Ovlp_MIMIC3_nonbc.rds", FORMULA_ovl2_bc)
+FP2("wgt_man_Ovlp_AUMC_nonbc.rds", FORMULA_ovl2_bc)
+
+nonbc_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_nonbc.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_nonbc.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_nonbc.rds") %>% mutate("dataset"="AUMC"))
+nonbc_METADF_AKID <- nonbc_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+nonbc_METADF_AKI <- nonbc_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+nonbc_METADF_HD <- nonbc_METADF0 %>% subset(outcome=="outcome_new_dial")
+nonbc_METADF_D <- nonbc_METADF0 %>% subset(outcome=="death_in_7d")
+nonbc_METADF_HDD <- nonbc_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+nonbc_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonbc_METADF_AKID)
+nonbc_METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonbc_METADF_AKI)
+nonbc_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonbc_METADF_HD)
+nonbc_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonbc_METADF_D)
+nonbc_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonbc_METADF_HDD)
+
+METAF(nonbc_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (Non-BC)")
+nonbc_METARES_AKI
+nonbc_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+
+
+\_\_
+
+#### 10c. Backgrounds, outcomes, matching quality, and forrest plot among those [**SIRS<2**]{.underline} [at treatment start.]{.underline}
+
+```{r stratified ovlp SIRS less than 2, message=F, warning=F}
+FORMULA_ovl2_sirs <- drug01 ~ age_cat + sex + dep_type2 + pre_blood_culture + treat_van + vasopressor + base_crea + near_crea +  base_KDIGO
+
+#1. overlap-PSM using MIMIC3, "SIRS<2"
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&sirs<2), FORMULA_ovl2_sirs, "Ovlp_MIMIC3_Lsirs", "**Ovlp, MIMIC-III, SIRS<2**")
+#2. overlap-PSM using MIMIC4, "SIRS<2"
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&sirs<2), FORMULA_ovl2_sirs, "Ovlp_MIMIC4_Lsirs", "**Ovlp, MIMIC-IV, SIRS<2**")
+#3. overlap-PSM using AUMC, "SIRS<2"
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&sirs<2), FORMULA_ovl2_sirs, "Ovlp_AUMC_Lsirs", paste0("**Ovlp, AUMC, SIRS<2**"))
+
+FP2("wgt_man_Ovlp_MIMIC3_Lsirs.rds", FORMULA_ovl2_sirs)
+FP2("wgt_man_Ovlp_MIMIC4_Lsirs.rds", FORMULA_ovl2_sirs)
+FP2("wgt_man_Ovlp_AUMC_Lsirs.rds", FORMULA_ovl2_sirs)
+
+Lsirs_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_Lsirs.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_Lsirs.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_Lsirs.rds") %>% mutate("dataset"="AUMC"))
+Lsirs_METADF_AKID <- Lsirs_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+Lsirs_METADF_AKI <- Lsirs_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+Lsirs_METADF_HD <- Lsirs_METADF0 %>% subset(outcome=="outcome_new_dial")
+Lsirs_METADF_D <- Lsirs_METADF0 %>% subset(outcome=="death_in_7d")
+Lsirs_METADF_HDD <- Lsirs_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+Lsirs_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Lsirs_METADF_AKID)
+Lsirs_METARES_AKI <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Lsirs_METADF_AKI)
+Lsirs_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Lsirs_METADF_HD)
+Lsirs_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Lsirs_METADF_D)
+Lsirs_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Lsirs_METADF_HDD)
+
+METAF(Lsirs_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (sirs<2)")
+Lsirs_METARES_AKI
+Lsirs_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+\_\_
+
+#### 10d. Backgrounds, outcomes, matching quality, and forest plot among those [**SIRS>1.99**]{.underline}
+
+```{r stratified ovlp sirs higher than 2, message=F, warning=F}
+#1. overlap-PSM using MIMIC3, SIRS>1.99
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&sirs>1.99), FORMULA_ovl2_sirs, "Ovlp_MIMIC3_Hsirs", "**Ovlp, MIMIC-III, SIRS>1.99**")
+#2. overlap-PSM using MIMIC4, SIRS>1.99
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&sirs>1.99), FORMULA_ovl2_sirs, "Ovlp_MIMIC4_Hsirs", "**Ovlp, MIMIC-IV, SIRS>1.99**")
+#3. overlap-PSM using AUMC, SIRS>1.99
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&sirs>1.99), FORMULA_ovl2_sirs, "Ovlp_AUMC_Hsirs", "**Ovlp, AUMC, SIRS>1.99**")
+
+FP2("wgt_man_Ovlp_MIMIC4_Hsirs.rds", FORMULA_ovl2_sirs)
+FP2("wgt_man_Ovlp_MIMIC3_Hsirs.rds", FORMULA_ovl2_sirs)
+FP2("wgt_man_Ovlp_AUMC_Hsirs.rds", FORMULA_ovl2_sirs)
+
+Hsirs_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_Hsirs.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_Hsirs.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_Hsirs.rds") %>% mutate("dataset"="AUMC"))
+Hsirs_METADF_AKID <- Hsirs_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+Hsirs_METADF_AKI <- Hsirs_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+Hsirs_METADF_HD <- Hsirs_METADF0 %>% subset(outcome=="outcome_new_dial")
+Hsirs_METADF_D <- Hsirs_METADF0 %>% subset(outcome=="death_in_7d")
+Hsirs_METADF_HDD <- Hsirs_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+Hsirs_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Hsirs_METADF_AKID)
+Hsirs_METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = Hsirs_METADF_AKI)
+Hsirs_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Hsirs_METADF_HD)
+Hsirs_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Hsirs_METADF_D)
+Hsirs_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = Hsirs_METADF_HDD)
+
+METAF(Hsirs_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (SIRS>1.99)")
+Hsirs_METARES_AKI
+Hsirs_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+#### 11c. Backgrounds, outcomes, matching quality, and forrest plot among those [**with vasopressor**]{.underline} [at treatment start.]{.underline}
+
+```{r stratified ovlp vaso, message=F, warning=F}
+
+FORMULA_ovl2_vaso <- drug01 ~  age_cat + sex + dep_type2 + sirs + pre_blood_culture + treat_van + base_crea + near_crea +  base_KDIGO
+
+#1. overlap-PSM using MIMIC3, vasopressor
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&vasopressor==T), FORMULA_ovl2_vaso, "Ovlp_MIMIC3_vaso", "**Ovlp, MIMIC-III, with vaso**")
+#2. overlap-PSM using MIMIC4, vasopressor
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&vasopressor==T), FORMULA_ovl2_vaso, "Ovlp_MIMIC4_vaso", "**Ovlp, MIMIC-IV, with vaso**")
+#3. overlap-PSM using AUMC, vasopressor
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&vasopressor==T), FORMULA_ovl2_vaso, "Ovlp_AUMC_vaso", paste0("**Ovlp, AUMC, with vaso**"))
+
+#Forrestplot
+FP2("wgt_man_Ovlp_MIMIC3_vaso.rds", FORMULA_ovl2_vaso)
+FP2("wgt_man_Ovlp_MIMIC4_vaso.rds", FORMULA_ovl2_vaso)
+FP2("wgt_man_Ovlp_AUMC_vaso.rds", FORMULA_ovl2_vaso)
+
+vaso_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_vaso.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_vaso.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_vaso.rds") %>% mutate("dataset"="AUMC"))
+vaso_METADF_AKID <- vaso_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+vaso_METADF_AKI <- vaso_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+vaso_METADF_HD <- vaso_METADF0 %>% subset(outcome=="outcome_new_dial")
+vaso_METADF_D <- vaso_METADF0 %>% subset(outcome=="death_in_7d")
+vaso_METADF_HDD <- vaso_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+vaso_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = vaso_METADF_AKID)
+vaso_METARES_AKI <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = vaso_METADF_AKI)
+vaso_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = vaso_METADF_HD)
+vaso_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = vaso_METADF_D)
+vaso_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = vaso_METADF_HDD)
+
+METAF(vaso_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (with vasopressor)")
+vaso_METARES_AKI
+vaso_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+\_\_
+
+\_\_
+
+#### 11d. Backgrounds, outcomes, matching quality, and forest plot among those [**non-vasopressor**]{.underline}
+
+```{r stratified ovlp no-vaso, message=F, warning=F}
+#1. overlap-PSM using MIMIC3, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="MIMIC3"&vasopressor==F), FORMULA_ovl2_vaso, "Ovlp_MIMIC3_nonvaso", "**Ovlp, MIMIC-III, No-vaso**")
+#2. overlap-PSM using MIMIC4, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="miiv"&vasopressor==F), FORMULA_ovl2_vaso, "Ovlp_MIMIC4_nonvaso", "**Ovlp, MIMIC-IV, No-vaso**")
+#3. overlap-PSM using AUMC, Older
+OVLP(comb_DF2ovl %>% subset(dataset=="AUMC"&vasopressor==F), FORMULA_ovl2_vaso, "Ovlp_AUMC_nonvaso", "**Ovlp, AUMC, No-vaso**")
+
+FP2("wgt_man_Ovlp_MIMIC4_nonvaso.rds", FORMULA_ovl2_vaso)
+FP2("wgt_man_Ovlp_MIMIC3_nonvaso.rds", FORMULA_ovl2_vaso)
+FP2("wgt_man_Ovlp_AUMC_nonvaso.rds", FORMULA_ovl2_vaso)
+
+nonvaso_METADF0 <- rbind(
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_nonvaso.rds") %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_nonvaso.rds") %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_nonvaso.rds") %>% mutate("dataset"="AUMC"))
+nonvaso_METADF_AKID <- nonvaso_METADF0 %>% subset(outcome=="outcome_KDIGO_inc_or_death")
+nonvaso_METADF_AKI <- nonvaso_METADF0 %>% subset(outcome=="outcome_KDIGO_inc")
+nonvaso_METADF_HD <- nonvaso_METADF0 %>% subset(outcome=="outcome_new_dial")
+nonvaso_METADF_D <- nonvaso_METADF0 %>% subset(outcome=="death_in_7d")
+nonvaso_METADF_HDD <- nonvaso_METADF0 %>% subset(outcome=="outcome_HDD_in7d")
+
+nonvaso_METARES_AKID <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonvaso_METADF_AKID)
+nonvaso_METARES_AKI <-rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonvaso_METADF_AKI)
+nonvaso_METARES_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonvaso_METADF_HD)
+nonvaso_METARES_D <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonvaso_METADF_D)
+nonvaso_METARES_HDD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = nonvaso_METADF_HDD)
+
+METAF(nonvaso_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development/progression (No-vasopressor)")
+nonvaso_METARES_AKI
+nonvaso_METADF_AKI %>% dplyr::select(dataset, OR, LCI, UCI, 'Pr(>|z|)') %>% remove_rownames()
+```
+
+
+\_\_
+
+#### 12. Firth's regression -\> forest plot.
+
+In some subgroup analyses, outcomes only developed one group. Then, we
+couldn't estimate odds ratio. Therefore, we estimated the ratio using
+Firth's regression
+
+```{r ovlp Firth method, warning=F, message=F}
+#Firth's method function
+library(logistf) #install.packages("logistf")
+DF <- readRDS("wgt_man_Ovlp_MIMIC3_base12.rds")
+DF$drug_type <- DF$drug_type %>% factor() %>% relevel(, ref = "NCC")
+saveRDS(DF,"wgt_man_Ovlp_MIMIC3_base12.rds")
+#logistf(formula = as.formula("outcome_KDIGO_inc ~ drug_type"), data  = readRDS("wgt_man_Ovlp_MIMIC3_base12.rds"), weights = ovlp_wgt)
+
+OVLP_OR_F <- function(DF, FORM, OUTCOME, TITLE){
+fit <- logistf(formula = as.formula(paste0(OUTCOME," ~ drug_type")), data  = DF, weights = ovlp_wgt)
+fit %>% summary() %>% print()
+est<-coef(fit)["drug_typeI/C"]
+ci<-confint(fit)["drug_typeI/C", ]
+summary1 <- data.frame(Estimate = est, Std.Error = (ci[2] - ci[1]) / (2 * 1.96), lwr=ci[1], upr=ci[2], 
+                       study=TITLE, outcome=OUTCOME)
+svy_design <- svydesign(~1, data = DF %>% as.data.frame(), weights = DF$ovlp_wgt)
+fmla <- as.formula(paste("~", OUTCOME))
+summary1 <- summary1 %>% mutate("pts"= svytable(fmla, svy_design) %>% as.data.frame() %>% .$Freq %>% sum(),
+                                "events"=svytable(fmla, svy_design) %>% as.data.frame() %>% filter(.data[[OUTCOME]]==T) %>% .$Freq %>% sum())
+summary1
+}
+
+FP2_F <- function(RDS, FORM,  OUTCOME, TITLE){
+OR_RES_F <- OVLP_OR_F(readRDS(RDS), FORM, OUTCOME, TITLE) %>% 
+  mutate("events_percentage"=events/sum(.$event), "pts_percentage"=pts/sum(.$pts))
+saveRDS(OR_RES_F, paste0("ORRES_F_",RDS))}
+
+
+
+### Start with each assessment
+## Subgroup with AKI at treatment start -> AKI progression in mimic3
+FP2_F("wgt_man_Ovlp_MIMIC3_base12.rds", FORMULA_ovl2, "outcome_KDIGO_inc", "AKI progression")
+
+base12_METADF_F0 <- rbind( #Firth method only used for MIMIC3
+  readRDS("ORRES_F_wgt_man_Ovlp_MIMIC3_base12.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_base12.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_base12.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>%mutate("dataset"="AUMC"))
+
+base12_METADF_F_AKI <- base12_METADF_F0 %>% subset(outcome=="outcome_KDIGO_inc")
+base12_METARES_F_AKI <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = base12_METADF_F_AKI)
+
+base12_METARES_F_AKI
+SCALEA4<-c(0.01, 1, 16)
+SCALEB4 <- c(-14,8.5)
+SCALEC4 <- c(-8,-5.5)
+METAF(base12_METARES_F_AKI, SCALEA4, SCALEB4, SCALEC4, "(B) AKI progression (with AKI at treatment start)")
+
+## Subgroup without AKI at treatment start -> RRT in mimic4
+DFbase <- readRDS("wgt_man_Ovlp_MIMIC4_base0.rds")
+DFbase$drug_type <- DFbase$drug_type %>% factor() %>% relevel(, ref = "NCC")
+saveRDS(DFbase,"wgt_man_Ovlp_MIMIC4_base0.rds")
+FP2_F("wgt_man_Ovlp_MIMIC4_base0.rds", FORMULA_ovl2, "outcome_new_dial", "hemodialysis")
+
+base0_METADF_F0 <- rbind( #Firth method only used for MIMIC4
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC3_base0.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_F_wgt_man_Ovlp_MIMIC4_base0.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_base0.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>%mutate("dataset"="AUMC"))
+
+base0_METADF_F_HD <- base0_METADF_F0 %>% subset(outcome=="outcome_new_dial")
+base0_METARES_F_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = base0_METADF_F_HD)
+
+base0_METARES_F_HD
+METAF(base0_METARES_F_HD, SCALEA4, SCALEB4, SCALEC4, "(A) RRT-intervention (without AKI at treatment start)")
+
+## Subgroup with AKI at treatment start -> RRT in mimic3
+DFbase <- readRDS("wgt_man_Ovlp_MIMIC3_base12.rds")
+DFbase$drug_type <- DFbase$drug_type %>% factor() %>% relevel(, ref = "NCC")
+saveRDS(DFbase,"wgt_man_Ovlp_MIMIC3_base12.rds")
+FP2_F("wgt_man_Ovlp_MIMIC3_base12.rds", FORMULA_ovl2, "outcome_new_dial", "hemodialysis")
+
+base12_METADF_F0 <- rbind( #Firth method only used for MIMIC3
+  readRDS("ORRES_F_wgt_man_Ovlp_MIMIC3_base12.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>% mutate("dataset"="MIMIC-III"),
+  readRDS("ORRES_wgt_man_Ovlp_MIMIC4_base12.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>% mutate("dataset"="MIMIC-IV"),
+  readRDS("ORRES_wgt_man_Ovlp_AUMC_base12.rds") %>% dplyr::select(Estimate, Std.Error, outcome, pts, events) %>%mutate("dataset"="AUMC"))
+
+base12_METADF_F_HD <- base12_METADF_F0 %>% subset(outcome=="outcome_new_dial")
+base12_METARES_F_HD <- rma(yi = Estimate, sei = Std.Error, method = "REML", data = base12_METADF_F_HD)
+
+base12_METARES_F_HD
+METAF(base12_METARES_F_HD, SCALEA4, SCALEB4, SCALEC4, "(A) RRT-intervention (with AKI at treatment start)")
+
+
+
+#export
+#subgroup main
+tiff("Figure 4 (subgroup AKI).tif", 
+     width = 6, 
+     height = 8,     # Tall file to fit 3 plots vertically
+     units = "in", 
+     res = 300, 
+     compression = "lzw")
+par(mfrow = c(2, 1))
+METAF(base0_METARES_AKI, SCALEA1, SCALEB1, SCALEC1, "(A) AKI development (without AKI at treatment start)")
+METAF(base12_METARES_F_AKI, SCALEA4, SCALEB4, SCALEC4, "(B) AKI progression (with AKI at treatment start)")
+dev.off()
+
+#export wo AKI
+tiff("eFigure 4 (secondary wo AKI).tif", 
+     width = 6, 
+     height = 8,     
+     units = "in", 
+     res = 300, 
+     compression = "lzw")
+par(mfrow = c(3, 1))
+METAF(base0_METARES_F_HD, SCALEA4, SCALEB4, SCALEC4, "(A) RRT-intervention (without AKI at treatment start)")
+METAF(base0_METARES_D, SCALEA1, SCALEB1, SCALEC1, "(B) Death (without AKI at treatment start)")
+METAF(base0_METARES_HDD, SCALEA1, SCALEB1, SCALEC1, "(C) RRT-intervention or death (without AKI at treatment start)")
+dev.off()
+
+#export w AKI
+tiff("eFigure 5 (secondary w AKI).tif", 
+     width = 6, 
+     height = 8,     
+     units = "in", 
+     res = 300, 
+     compression = "lzw")
+par(mfrow = c(3, 1))
+METAF(base12_METARES_F_HD, SCALEA4, SCALEB4, SCALEC4, "(A) RRT-intervention (with AKI at treatment start)")
+METAF(base12_METARES_D, SCALEA1, SCALEB1, SCALEC1, "(B) Death (with AKI at treatment start)")
+METAF(base12_METARES_HDD, SCALEA1, SCALEB1, SCALEC1, "(C) RRT-intervention or death (with AKI at treatment start)")
+dev.off()
+```
+
+\_\_
+
+#### 13. Summary of subgroup analysis
+
+```{r summary, fig.width=4.5,fig.height=3.5}
+SCALEAsub<-c(0.25, 1, 4)
+SCALEBsub <- c(-2.8,3.5)
+
+SCALEAsub2<-c(0.1, 1, 10)
+SCALEBsub2 <- c(-5.5, 6)
+
+METAF2 <- function(METARES, AAA, BBB,TITLE){
+metafor::forest(METARES,  atransf=exp, at=log(AAA), slab = dataset,
+       xlim=BBB, 
+       #ilab=cbind(round(pts, digits=1), round(events, digits=1)), 
+       #ilab.lab=c("Subjects","Events"), ilab.pos = 2,
+       #ilab.xpos=CCC,
+       cex=0.85, cex.axis=0.7, annotate=T,
+       header="", xlab="Odds ratio", mlab="Overall", shade=TRUE, 
+       main=TITLE, adj=0)
+}
+METAF2(base0_METARES_AKI, SCALEAsub2, SCALEBsub2,  "no AKI")
+METAF2(base12_METARES_F_AKI, SCALEAsub2, SCALEBsub2, "with AKI") #Filth!!!
+
+METAF2(Young_METARES_AKI, SCALEAsub, SCALEBsub, "Age < 60y")
+METAF2(Old_METARES_AKI, SCALEAsub, SCALEBsub, "Age 60y or older")
+
+METAF2(Male_METARES_AKI, SCALEAsub, SCALEBsub, "Male")
+METAF2(Female_METARES_AKI, SCALEAsub, SCALEBsub, "Female")
+
+METAF2(surg_METARES_AKI, SCALEAsub, SCALEBsub, "Surgical unit")
+METAF2(nonsurg_METARES_AKI, SCALEAsub, SCALEBsub, "Non-surgical unit")
+
+METAF2(Lsirs_METARES_AKI, SCALEAsub, SCALEBsub, "SIRS<2")
+METAF2(Hsirs_METARES_AKI, SCALEAsub, SCALEBsub, "SIRS=2 or higher")
+
+METAF2(bc_METARES_AKI, SCALEAsub, SCALEBsub, "with pre-blood culture")
+METAF2(nonbc_METARES_AKI, SCALEAsub, SCALEBsub, "no pre-blood culture")
+
+METAF2(vc_METARES_AKI, SCALEAsub, SCALEBsub, "Vancomycin treated")
+METAF2(novc_METARES_AKI, SCALEAsub, SCALEBsub, "No vancomycin treatment")
+
+METAF2(vaso_METARES_AKI, SCALEAsub, SCALEBsub, "Vasopressor treated")
+METAF2(nonvaso_METARES_AKI, SCALEAsub, SCALEBsub, "No vasopressor")
+
+#export
+tiff("eFigure 6 (various subgroup).tif", 
+     width = 16, 
+     height = 16,     # Tall file to fit 3 plots vertically
+     units = "in", 
+     res = 300, 
+     compression = "lzw")
+par(mfrow = c(4, 4))
+METAF2(Young_METARES_AKI, SCALEAsub, SCALEBsub, "Age < 60y")
+METAF2(Old_METARES_AKI, SCALEAsub, SCALEBsub, "Age 60y or older")
+METAF2(Male_METARES_AKI, SCALEAsub, SCALEBsub, "Male")
+METAF2(Female_METARES_AKI, SCALEAsub, SCALEBsub, "Female")
+METAF2(surg_METARES_AKI, SCALEAsub, SCALEBsub, "Surgical unit")
+METAF2(nonsurg_METARES_AKI, SCALEAsub, SCALEBsub, "Non-surgical unit")
+METAF2(Lsirs_METARES_AKI, SCALEAsub, SCALEBsub, "SIRS<2")
+METAF2(Hsirs_METARES_AKI, SCALEAsub, SCALEBsub, "SIRS=2 or higher")
+METAF2(bc_METARES_AKI, SCALEAsub, SCALEBsub, "with pre-blood culture")
+METAF2(nonbc_METARES_AKI, SCALEAsub, SCALEBsub, "no pre-blood culture")
+METAF2(vc_METARES_AKI, SCALEAsub, SCALEBsub, "Vancomycin treated")
+METAF2(novc_METARES_AKI, SCALEAsub, SCALEBsub, "No vancomycin treatment")
+METAF2(vaso_METARES_AKI, SCALEAsub, SCALEBsub, "Vasopressor treated")
+METAF2(nonvaso_METARES_AKI, SCALEAsub, SCALEBsub, "No vasopressor")
+dev.off()
+```
+
+
+```{r darren method, include=F}
+#PSM with MIMIC4
+matched_MIMIC4 <- matchit(data=comb_DF2 %>% subset(dataset=="miiv"), FORMULA0, method="nearest", caliper=0.2, distance="glm", link="logit", estimand="ATT", replace=F, ratio=1)
+DM_MIMIC4 <- comb_DF2 %>% subset(dataset=="miiv") %>% mutate("distance"=matched_MIMIC4$distance)
+
+matched_MIMIC3 <- matchit(data=comb_DF2 %>% subset(dataset=="MIMIC3"), FORMULA0, method="nearest", caliper=0.2, distance="glm", link="logit", estimand="ATT", replace=F, ratio=1)
+DM_MIMIC3 <- comb_DF2 %>% subset(dataset=="MIMIC3") %>% mutate("distance"=matched_MIMIC3$distance)
+
+matched_AUMC <- matchit(data=comb_DF2 %>% subset(dataset=="AUMC"), FORMULA0, method="nearest", caliper=0.2, distance="glm", link="logit", estimand="ATT", replace=F, ratio=1)
+DM_AUMC <- comb_DF2 %>% subset(dataset=="AUMC") %>% mutate("distance"=matched_AUMC$distance)
+
+DM_FORMULA <- "outcome_KDIGO_inc ~ drug01 + distance + age_cat + sex + dep_type2 + sirs + pre_blood_culture + treat_van + vasopressor + base_crea + near_crea + base_KDIGO"
+
+DMDF <-
+rbind(
+  glm(as.formula(DM_FORMULA), data=DM_MIMIC3) %>% broom::tidy() %>% subset(term=="drug01") %>% mutate(dataset="MIMIC3"),
+  glm(as.formula(DM_FORMULA), data=DM_MIMIC4) %>% broom::tidy() %>% subset(term=="drug01") %>% mutate(dataset="MIMIC4"),
+  glm(as.formula(DM_FORMULA), data=DM_AUMC) %>% broom::tidy() %>% subset(term=="drug01") %>% mutate(dataset="AUMC")
+  )
+DMDF$dataset <- DMDF$dataset %>% factor(levels = c("AUMC", "MIMIC4", "MIMIC3"))
+ggplot(DMDF, aes(exp(estimate), dataset))+geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_errorbarh(aes(xmin = exp(estimate - 1.96 * std.error), 
+                     xmax = exp(estimate + 1.96 * std.error)), 
+                 height = 0.15, color = "black", linewidth = 0.7) +
+  geom_point(size=3.5)+theme_classic()+ xlim(c(0.5,2))+
+  labs(x = "Log Odds / Estimate", 
+       y = "Dataset", 
+       title = "Forest Plot of drug01 Effect Across Datasets") +ggtitle("AKI development/progression (<- glm with confounders&PS)")
+```
