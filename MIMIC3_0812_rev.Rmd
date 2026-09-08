@@ -1,0 +1,792 @@
+---
+title: "mimic3_0812_rev"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: united
+  pdf_document: 
+    toc: true
+    toc_depth: 3
+  word_document:
+    toc: true
+    toc_depth: '3'
+date: "`r Sys.Date()`"
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# [**MIMIC3**]{.underline}
+
+### MIMIC3 data managing
+
+#### 1. Base settings of R and data
+
+```{r download import, echo=T, warning=F, message= F}
+library(ricu) #install.packages("ricu")
+library(fst)#install.packages("fst")
+library(utils)
+library(tidyverse)
+library(units)
+library(dplyr)
+library(here)
+library(gtsummary) #install.packages("gtsummary")
+#install.packages("tinytex")
+#tinytex::install_tinytex()
+#Sys.which("pdflatex")
+
+###Set folder path
+Sys.setenv(RICU_DATA_PATH="C:\\Users\\aomura\\Desktop\\ricu2") #C:\\Users\\aomura\\OneDrive - Oregon Health & Science University\\Desktop\\ricu2
+dir<-paste0(ricu::data_dir(),"\\mimic")
+
+###Set username and password (Already done -> not run this time)
+#Sys.setenv(RICU_PHYSIONET_USER="aomura")
+#Sys.setenv(RICU_PHYSIONET_PASS="") #<- Hidden
+
+###Download and import mimic3 data (Already done -> not run this time)
+#download_src("mimic",data_dir=dir,user="aomura", pass="", verbose=TRUE)
+#import_src("mimic", data_dir=dir, force=T, verbose=T)
+
+###Attach mimic3 data (then you can check by ricu::src_data_avail())
+ricu::attach_src("mimic", data_dir = dir, assign_env = NULL)
+src  <- "mimic"
+detach("package:ricu", unload = TRUE)
+```
+
+**\_\_**
+
+#### **2. Extract the data about carbapenems usage**
+
+##### Collect data of carbapenems injection
+
+```{r penem collect}
+##collect data of carbapenems injection
+penem_names <- "penem|PENEM|primaxin|Primaxin|PRIMAXIN|merrem|Merrem|MERREM|meronem|Meronem|MERONEM|invanz|Invanz|INVANZ|doribax|Doribax|DORIBAX|vabomere|Vabomere|VABOMERE|recarbrio|Recarbrio|RECABRIO"
+received_carbapenems <- ricu::mimic$prescriptions[grep(penem_names, ricu::mimic$prescriptions$drug, ignore.case=TRUE),] 
+
+#The data had no injection "time". Since the average of injection time on mimic4 was PM0 or 1, add 12h to the injection data.  
+received_carbapenems$startdate2 <- received_carbapenems$startdate + dminutes(780)
+
+carbapenems <- received_carbapenems %>% dplyr::select(subject_id, hadm_id, icustay_id, drug, formulary_drug_cd, gsn,route, dose_val_rx, startdate2, enddate) %>% filter(hadm_id %in% (read.csv("ADMISSIONS_true_mimic3.csv") %>% .$hadm_id))
+
+#check injections
+carbapenem_summary <- carbapenems %>% group_by(drug) %>% reframe(Subjects_Receiving=n_distinct(subject_id), Unique_hadm_admissions=n_distinct(hadm_id))
+carbapenem_summary %>% rbind(c("original","",sum(.$Unique_hadm_admissions)),.)
+```
+
+```{r penem check garbage, include=F}
+##collect carbapenems orders from input events
+#t <- as.data.frame(ricu::mimic$d_items)
+#t %>% filter(str_detect(label,".*penem")) %>% head(3)
+#t %>% filter(str_detect(label,".*penem")) %>% .$label %>% unique() 
+#t %>% filter(str_detect(label,".*penem")) %>% .$dbsource %>% unique() 
+
+##collect carbapenems data from inputevents
+##first check itemid of injection of antibiotics 
+#u <- t %>% filter((linksto=="inputevents_mv") & (str_detect(label,".*penem")==TRUE))
+#carbapenem_itemids <- unlist(u$itemid)
+#imipenem_itemid <- 225876
+#imipenem_cilastatins <- received_imipenem_cilastatin %>% dplyr::select(subject_id, hadm_id, icustay_id, drug, formulary_drug_cd, gsn,route, dose_val_rx, startdate, enddate)
+#received_imipenem_cilastatin <- ricu::mimic$prescriptions[grep("lastatin", ricu::mimic$prescriptions$drug, ignore.case=T),]
+#received_imipenem_cilastatin <- received_imipenem_cilastatin %>% mutate(imipenem_cilastatin=TRUE)
+#received_carbapenems <- received_carbapenems %>% mutate(carbapenem=TRUE)
+```
+
+\_\_
+
+##### Check the counts of hospital admission (hadm) which containing ICU-carbabapenems usage
+
+```{r get basic data}
+###Counts hospital admission (hadm) which includes ICU-carbabapenem use
+ICU_carbapenem_hadmID <- carbapenems %>% filter(!is.na(icustay_id)) %>% .$hadm_id %>% unique()
+c("hadm counts with ICU-carbabapenem usage", ICU_carbapenem_hadmID %>% unique() %>% length())
+```
+
+\_\_
+
+##### Obtain 1st (earliest)-carbapenems usage in the hospital admission of each patient (-\> number of treated patients)
+
+##### Then, exclude some of non-eligible patients.
+
+```{r get basic data_1}
+###Get 1st(earliest)-carbapenem in the hadm (I decided not icustay_id but hadm_id!!!)
+#hadm_id not exists in "ICU_carbapenem_hadmID" means hadm w/o ICU-carbapenem -> removed.
+#Subjects with "icustay_id = NA". Those may mean 1st-carbapenem (1st-ABX) was before ICU. (Not w/o-carbapenem during ICU admission, because I already filtered those by "hadm_id %in% ICU_carbapenem_hadmID" in the code). Leave it now.
+carbapenem0 <- carbapenems %>% group_by(hadm_id) %>% mutate(hadm_first_carbapenem_start=min(startdate2)) %>%
+                              filter(hadm_first_carbapenem_start==startdate2) %>% 
+                              dplyr::select(-startdate2, -enddate) %>% filter(hadm_id %in% ICU_carbapenem_hadmID & !is.na(icustay_id)) %>%  
+                              distinct()
+c("prior penems usage excluded", carbapenem0$hadm_id %>% unique() %>% length())
+
+###Delete some duplicates (different dosage/name in the same day same patients)
+carbapenem0$drug_type <- ifelse(carbapenem0$drug=="Imipenem-Cilastatin", "IMI", 
+                                 ifelse(carbapenem0$drug=="Imipenem-Cilastatin *NF*", "IMI", "non_IMI"))
+duplicated_rows <- duplicated(carbapenem0[, c("hadm_id", "drug_type")])
+carbapenem00 <- carbapenem0[!duplicated_rows, ]
+c("duplicated injection excluded", carbapenem00$hadm_id %>% unique() %>% length())
+
+###Some patients started imipenem/cilastatin and other carbapenem at the same day.Why??????. Delete those from both groups.
+remain_id <- carbapenem00 %>% group_by(hadm_id) %>% summarise(n=n()) %>% filter(n<2) %>% .$hadm_id
+carbapenem <- carbapenem00[carbapenem00$hadm_id %in% remain_id, ]
+c("imi/cil_carbapenems_duplicated subjects excluded", carbapenem$hadm_id %>% unique() %>% length())
+```
+
+\_\_
+
+#### **3. Extract the data about hospital/ICU admission**
+
+```{r get basic data2}
+###obtain admission time (intime) of hadm and ICU
+hadm_intime <- ricu::load_src(ricu::mimic$admissions, hadm_id %in% carbapenem$hadm_id) %>% as.data.frame() %>%
+                dplyr::select(hadm_id, admittime) %>% rename("hadm_time"=admittime)
+ICU_intime <- ricu::load_src(ricu::mimic$icustays, hadm_id %in% carbapenem$hadm_id) %>% as.data.frame() %>% 
+                dplyr::select(icustay_id, intime) %>% rename("ICU_admit_time"=intime)
+
+###Add those admission time info to carbapenem_DF.
+carbapenem_a <- carbapenem %>% left_join(hadm_intime, by="hadm_id") %>% left_join(ICU_intime, by="icustay_id") %>% distinct()
+
+###ICUstay_id NA may mean first ABX was before ICU (not meaning not ICU admission as written above chunk). Delete those.
+carbapenem_b <- carbapenem_a %>% filter(!is.na(icustay_id)) 
+
+###Delete the patients who got 1st-ABX in the hadm before ICU admission
+carbapenem_b1 <- carbapenem_b %>% mutate("sec_ICUadmit_to_abx"= hadm_first_carbapenem_start - ICU_admit_time) %>%
+                  filter(sec_ICUadmit_to_abx>0) %>% dplyr::select(-sec_ICUadmit_to_abx)
+
+
+carbapenem_b2<- carbapenem_b1 %>% subset(drug!="Meropenem Desensitization")
+
+###check carbapenems number (per hadm_id!)
+list(c("carbapenem usage hadm among PTs who experienced ICU", carbapenem  %>% nrow()),
+     c("carbapenem before ICU in the hadm were excluded", carbapenem_b1 %>% nrow()),
+       c("carbapenem with desensitization excluded", carbapenem_b2 %>% nrow))
+```
+```{r group transfer, message=F, warning=F}
+carbapenems$drug_type <- ifelse(carbapenems$drug=="Imipenem-Cilastatin", "IMI", 
+                        ifelse(carbapenems$drug=="Imipenem-Cilastatin *NF*", "IMI", "non_IMI"))
+first_IMI <- carbapenems %>% filter(drug_type=="IMI") %>% group_by(hadm_id) %>% filter(startdate2==min(startdate2)) %>%
+                              rename("hadm_1st_time_IMI"=startdate2) %>% filter(hadm_id %in% ICU_carbapenem_hadmID & !is.na(icustay_id)) %>%  
+                              distinct() %>% dplyr::select(hadm_id, hadm_1st_time_IMI) 
+first_nonIMI <- carbapenems %>% filter(drug_type=="non_IMI") %>% group_by(hadm_id) %>% filter(startdate2==min(startdate2)) %>%
+                              rename("hadm_1st_time_nIMI"=startdate2) %>% filter(hadm_id %in% ICU_carbapenem_hadmID & !is.na(icustay_id)) %>%  
+                              distinct() %>% dplyr::select(hadm_id, hadm_1st_time_nIMI) 
+
+carbapenem_b3 <- carbapenem_b2 %>% left_join(first_IMI, by="hadm_id") %>% left_join(first_nonIMI, by="hadm_id") %>% distinct()
+carbapenem_b3$time_switch_group0 <- abs(difftime(carbapenem_b3$hadm_1st_time_nIMI, carbapenem_b3$hadm_1st_time_IMI, units = "hours")) %>% as.numeric() %>% abs()
+
+carbapenem_b3$time_switch_group <- ifelse(is.na(carbapenem_b3$time_switch_group0), 168, 
+                                   ifelse(carbapenem_b3$time_switch_group0>168, 168, carbapenem_b3$time_switch_group0))
+carbapenem_b4 <- carbapenem_b3 %>% filter(time_switch_group>24)
+
+c("carbapenem w/o group transfer within 24h", carbapenem_b4  %>% nrow())
+```
+\_\_
+
+#### **4. Collect creatinine data to exclude patients without appropriate creatinine assessment**
+
+```{r creatinine}
+###obtain creatinine values (itemid=50912)
+creatinine <- ricu::load_src(ricu::mimic$labevents, itemid ==50912 & hadm_id %in% carbapenem$hadm_id) %>% 
+                as.data.frame() %>% 
+              dplyr::select(-itemid, -valuenum, -valueuom, -flag) %>% 
+                rename("creatinine"=value) #manually collect to obtain raw time
+
+###some data are like "less than 0.1" and cannot be tranformed to numeric. Delete those.
+creatinine$creatinine <- creatinine$creatinine %>% as.numeric()
+creatinine <- creatinine %>% filter(!is.na(creatinine))
+
+###Collect 1st(earliest) creatinine value in the hadm. 
+###Assess the measurement time from ICU admission.
+###1st_creatinine later than ICU admission means no creatinine measurement before ICU. Deleted.
+#exclude later than 1st-ABX would be better?????????) 
+First_creatinine <- creatinine %>% group_by(hadm_id) %>% summarise(first_Crea_time=min(charttime))
+carbapenem_c <- carbapenem_b4 %>% left_join(First_creatinine, by="hadm_id") %>% distinct() %>% 
+                 mutate("Crea_to_ICUadmit"=ICU_admit_time-first_Crea_time) %>% 
+                  filter(Crea_to_ICUadmit>0) %>% dplyr::select(-Crea_to_ICUadmit)
+
+###Collect last(latest) creatinine value in the hadm. 
+###Assess the measurement time after first_ABX.
+###last creatinine earlier 1st_ABX means follow creatinine up after ABX -> deleted for now.
+Last_creatinine <- creatinine %>% group_by(hadm_id) %>% summarise(Last_Crea_time=max(charttime))
+carbapenem_d <- carbapenem_c %>% left_join(Last_creatinine, by="hadm_id")  %>% distinct() %>%
+                 mutate("Crea_to_Abx"=hadm_first_carbapenem_start-Last_Crea_time) %>% 
+                  filter(Crea_to_Abx<0) %>% dplyr::select(-Crea_to_Abx)
+carbapenem_d$time_ICUadmit_to_abx <- difftime(carbapenem_d$hadm_first_carbapenem_start, carbapenem_d$ICU_admit_time, units = "hours")
+
+###Check the number of remained subjects
+list(
+c("No Crea measurement in the hadm before ICU was excluded", carbapenem_c %>% nrow),
+c("No Crea measurement in the hadm after Abx was excluded", carbapenem_d %>% nrow))
+```
+
+**\_\_**
+
+#### **5. Collect data about patients characteristics**
+
+##### Age and sex
+
+```{r age and sex data, message=FALSE}
+#Collect and add age and sex data
+dict <- ricu::load_dictionary(src="mimic")
+#dict %>% as.data.frame()
+age <- ricu::load_concepts("age", src="mimic") %>% as.data.frame() 
+age$age_group <- ifelse(age$age<18, NA,
+                  ifelse(age$age<40, "18-39",
+                   ifelse(age$age<50, "40-49",
+                    ifelse(age$age<60, "50-59",
+                     ifelse(age$age<70, "60-69",
+                      ifelse(age$age<80, "70-79", "80+"))))))
+age$age_cat <- ifelse(age$age_group=="18-39", 30, 
+                ifelse(age$age_group=="40-49", 45,
+                 ifelse(age$age_group=="50-59", 55,
+                  ifelse(age$age_group=="60-69", 65,
+                   ifelse(age$age_group=="70-79", 75,
+                    ifelse(age$age_group=="80+", 85, NA))))))
+sex <- ricu::load_concepts("sex", src="mimic") %>% as.data.frame()
+bmi <- ricu::load_concepts("bmi", src="mimic") %>% as.data.frame()
+bw <- ricu::load_concepts("weight", src="mimic") %>% as.data.frame()
+```
+
+\_\_
+
+##### Comorbidity from ICD9 records (chronic heart failure, diabetes, chronic kidney disease, hypertension)
+
+```{r comorbidities, warning=F}
+#  below from https://github.com/MIT-LCP/mimic-code/blob/main/mimic-iii/concepts/comorbidity/elixhauser_quan.sql
+# -- This code calculates the Elixhauser comorbidities as defined in Quan et. al 2009:
+#   -- Quan, Hude, et al. "Coding algorithms for defining comorbidities in
+# -- ICD-9-CM and ICD-10 administrative data." Medical care (2005): 1130-1139.
+# --  https://www.ncbi.nlm.nih.gov/pubmed/16224307
+# 
+# -- Quan defined an "Enhanced ICD-9" coding scheme for deriving Elixhauser
+# -- comorbidities from ICD-9 billing codes. This script implements that calculation.
+# 
+# -- The logic of the code is roughly that, if the comorbidity lists a length 3
+# -- ICD-9 code (e.g. 585), then we only require a match on the first 3 characters.
+# 
+# -- This code derives each comorbidity as follows:
+# --  1) ICD9_CODE is directly compared to 5 character codes
+# --  2) The first 4 characters of ICD9_CODE are compared to 4 character codes
+# --  3) The first 3 characters of ICD9_CODE are compared to 3 character codes
+
+icd9_df <- data.frame(ricu::load_id(ricu::mimic$diagnoses_icd))
+
+#chronic heart failure
+chf_codes<-c("39891","40201","40211","40291","40401","40403","40411","40413","40491","40493")
+chf_codes3<-c("428") #Broad "heart failre"
+chf_codes4<-c("4254","4255","4257","4258","4259")
+icd9_df <- icd9_df %>% mutate(chf=ifelse(icd9_code %in% chf_codes, TRUE, FALSE))
+icd9_df <- icd9_df %>% mutate(chf=ifelse(str_sub(icd9_code,1,3) %in% chf_codes3, TRUE, chf))
+icd9_df <- icd9_df %>% mutate(chf=ifelse(str_sub(icd9_code,1,4) %in% chf_codes4, TRUE, chf))
+
+#DM (manually collected)
+dm_codes <- c("24900","24901","24910","24911","24920","24921","24930","24931","24940","24941","24950","24951","24960","24961","24970","24971","24980","24981","24990","24991","25000","25001","25002","25003","25010","25011","25012","25013","25020","25021","25022","25023","25030","25031","25032","25033","25040","25041","25042","25043","25050","25051","25052","25053","25060","25061","25062","25063","25070","25071","25072","25073","25080","25081","25082","25083","25090","25091","25092","25093","2535","3572","36201","36202","36203","36204","36205","36206","36207","36641","5881","7751")
+icd9_df <- icd9_df %>% mutate(dm=ifelse(icd9_code %in% dm_codes, TRUE, FALSE))
+
+#CKD
+ckd_codes <- c('28521','40301','40311','40391','40402','40403','40412','40413','40492','40493')
+ckd_codes3 <- c('585','586', '587')
+ckd_codes4 <- c('5880','V420','V451', '5889', '7944')
+icd9_df<-icd9_df %>% mutate(ckd=ifelse(icd9_code %in% ckd_codes, TRUE, FALSE))
+icd9_df<-icd9_df %>% mutate(ckd=ifelse(str_sub(icd9_code,1,3) %in% ckd_codes3, TRUE, ckd))
+icd9_df<-icd9_df %>% mutate(ckd=ifelse(str_sub(icd9_code,1,4) %in% ckd_codes4, TRUE, ckd))
+
+#hypertension
+htn_codes <- c()
+htn_codes3 <- c("401","402","403","404","405")
+htn_codes4 <- c()
+icd9_df<-icd9_df%>%mutate(htn=ifelse(icd9_code%in%htn_codes,TRUE,FALSE))
+icd9_df <- icd9_df %>% mutate(htn=ifelse(str_sub(icd9_code,1,3) %in% htn_codes3, TRUE, FALSE))
+icd9_df<-icd9_df%>%mutate(htn=ifelse(str_sub(icd9_code,1,4)%in%htn_codes4,TRUE,htn))
+
+###combine
+icd9_df <- icd9_df %>% group_by(icustay_id) %>% summarize(ph_htn=(sum(htn)>0), ph_dm=(sum(dm)>0), ph_chf=(sum(chf)>0), ph_ckd=(sum(ckd)>0))
+```
+
+####Check cardiac surgery before Abx using ICD code
+```{r Check cardiac surgery before Abx using ICD code}
+CPTE <- ricu::mimic$cptevents %>% as.data.frame()  %>% filter(hadm_id %in% carbapenem_d$hadm_id) 
+PICD9 <- ricu::mimic$procedures_icd %>% as.data.frame() %>% filter(hadm_id %in% carbapenem_d$hadm_id) %>% 
+         left_join(ricu::mimic$d_icd_procedures %>% as.data.frame() %>% dplyr::select(icd9_code, short_title, long_title), by="icd9_code") %>% 
+          distinct() %>% dplyr::select(-seq_num)
+#No operation date!!!!
+```
+\_\_
+
+##### **Codes for checking the current progression**
+
+##### There are duplicated patients (same patient, different hospital/ICU admission)
+
+##### -\> But, I didn't care those duplication. Use those as different patients/subjects.
+
+```{r Codes for checking the current progression}
+list(c("counts of ICUstay", carbapenem_d$icustay_id %>% unique() %>% length()),
+      c("counts of hadm", carbapenem_d$hadm_id %>% unique() %>% length()),
+       c("counts of patients", carbapenem_d$subject_id %>% unique() %>% length())) #But I don't care duplicated patients
+```
+
+**\_\_**
+
+#### **6. Collect SOFA data at initiation of 1st-carbapenems treatment**
+
+##### -\> referring to SOFA data between -7 to -0 day until 1st-carbapenems treatment
+
+```{r base sofa}
+###SOFA score at time of 1st_ABX. (It takes long time. So, the first 3 lines are silenced) 
+#sofa <- ricu::load_concepts("sofa", src="mimic") %>% as.data.frame() 
+#saveRDS(sofa,"sofa.rds")
+sofa<-readRDS("sofa.rds")
+
+###Calculate the time from ICU_admission to 1st_ABX. Add those data in SOFA_DF
+#carbapenem_d$time_ICUadmit_to_abx_days <- difftime(carbapenem_d$hadm_first_carbapenem_start, carbapenem_d$ICU_admit_time, units="days") #overwrite
+sofa2 <- sofa %>% left_join(carbapenem_d %>% dplyr::select(icustay_id, time_ICUadmit_to_abx), by="icustay_id") %>% filter(!is.na(time_ICUadmit_to_abx)) %>% distinct()
+
+###Collect the SOFA scores which were closest to 1st-ABX time in each subjects
+sofa2$proximality_to_abx <- sofa2$charttime - sofa2$time_ICUadmit_to_abx
+sofa3 <- sofa2 %>% subset(proximality_to_abx>-168.1 & proximality_to_abx<0.01) %>% group_by(icustay_id) %>% slice_max(order_by = proximality_to_abx)
+
+#sofa_cns <- ricu::load_concepts("sofa_cns", src="mimic") %>% as.data.frame() 
+#saveRDS(sofa_cns,"sofa_cns.rds")
+sofa_cns <- readRDS("sofa_cns.rds") %>% as.data.frame() %>% filter(icustay_id %in% carbapenem_d$icustay_id) 
+sofa_cns2 <- sofa_cns %>% left_join(carbapenem_d %>% dplyr::select(icustay_id, time_ICUadmit_to_abx), by="icustay_id") %>% filter(!is.na(time_ICUadmit_to_abx)) %>% distinct()
+sofa_cns2$proximality_to_abx <- sofa_cns2$charttime - sofa_cns2$time_ICUadmit_to_abx
+sofa_cns3 <- sofa_cns2 %>% subset(proximality_to_abx>-168.1 & proximality_to_abx<0.01) %>% group_by(icustay_id) %>% slice_max(order_by = proximality_to_abx)
+
+#sofa_renal <- ricu::load_concepts("sofa_renal", src="mimic") %>% as.data.frame()
+#saveRDS(sofa_renal,"sofa_renal.rds")
+sofa_renal <- readRDS("sofa_renal.rds") %>% as.data.frame() %>% filter(icustay_id %in% carbapenem_d$icustay_id)
+sofa_renal2 <- sofa_renal %>% left_join(carbapenem_d %>% dplyr::select(icustay_id, time_ICUadmit_to_abx), by="icustay_id") %>% filter(!is.na(time_ICUadmit_to_abx)) %>% distinct()
+sofa_renal2$proximality_to_abx <- sofa_renal2$charttime - sofa_renal2$time_ICUadmit_to_abx
+sofa_renal3 <- sofa_renal2 %>% subset(proximality_to_abx>-168.1 & proximality_to_abx<0.01) %>% group_by(icustay_id) %>% slice_max(order_by = proximality_to_abx)
+
+#sep <- ricu::load_concepts("sep3", src="mimic") %>% as.data.frame()
+#saveRDS(sep,"sep.rds")
+sep <- readRDS("sep.rds") %>% as.data.frame() %>% filter(icustay_id %in% carbapenem_d$icustay_id)
+sep2 <- sep %>% left_join(carbapenem_d %>% dplyr::select(icustay_id, time_ICUadmit_to_abx), by="icustay_id") %>% filter(!is.na(time_ICUadmit_to_abx)) %>% distinct()
+sep2$proximality_to_abx <- sep2$charttime - sep2$time_ICUadmit_to_abx
+sep3 <- sep2 %>% subset(proximality_to_abx>-168.1 & proximality_to_abx<0.01) %>% group_by(icustay_id) %>% slice_max(order_by = proximality_to_abx)
+
+#sirs <- ricu::load_concepts("sirs", src="mimic") %>% as.data.frame()
+#saveRDS(sirs,"sirs.rds")
+sirs <- readRDS("sirs.rds") %>% as.data.frame() %>% filter(icustay_id %in% carbapenem_d$icustay_id)
+sirs2 <- sirs %>% left_join(carbapenem_d %>% dplyr::select(icustay_id, time_ICUadmit_to_abx), by="icustay_id") %>% filter(!is.na(time_ICUadmit_to_abx)) %>% distinct()
+sirs2$proximality_to_abx <- sirs2$charttime - sirs2$time_ICUadmit_to_abx
+sirs3 <- sirs2 %>% subset(proximality_to_abx>-168.1 & proximality_to_abx<0.01) %>% group_by(icustay_id) %>% slice_max(order_by = proximality_to_abx)
+
+#qsofa <- ricu::load_concepts("qsofa", src="mimic") %>% as.data.frame()
+#saveRDS(qsofa,"qsofa.rds")
+qsofa <- readRDS("qsofa.rds") %>% as.data.frame() %>% filter(icustay_id %in% carbapenem_d$icustay_id)
+qsofa2 <- qsofa %>% left_join(carbapenem_d %>% dplyr::select(icustay_id, time_ICUadmit_to_abx), by="icustay_id") %>% filter(!is.na(time_ICUadmit_to_abx)) %>% distinct()
+qsofa2$proximality_to_abx <- qsofa2$charttime - qsofa2$time_ICUadmit_to_abx
+qsofa3 <- qsofa2 %>% subset(proximality_to_abx>-168.1 & proximality_to_abx<0.01) %>% group_by(icustay_id) %>% slice_max(order_by = proximality_to_abx)
+```
+
+\_\_
+
+#### **7. Collect creatinine data to assess AKI stage at 1st_carbapenems (base AKI stage)**
+
+1.  Definition of KDIGO-AKI stage is like
+    [here](https://www.google.com/search?sca_esv=f3abac6c97ce75c7&rlz=1C1GCGZ_enUS1143US1143&sxsrf=AE3TifOebKzQqJs2WB9B1Mbqu_7235nM3A:1758676845480&udm=2&fbs=AIIjpHzuznnfRcKw6WJsjCzN2zWf55I9OrcLWiEzlPL8TiG0L_DqC0w_yKrYVnGrQTB16CZnNSIjQP6D4-nVGdJK4dmKLRGm2q9iZ8MYSZa5XlQjo8XFFjjLcCpEsAdvfdP2eMmNTRnjLAe6LpO7enjN3CzO0IZGs0dHi3xaS8ywMG8H3Y-YneaOlxKy7HvPxy8ZTOEG1cja32ItydtCnEy90dHS0m35sBM7E1emMfKrRBTBXFnBvXs&q=KDIGO+AKI&sa=X&ved=2ahUKEwjt9ZjlnfCPAxUNEzQIHXKvFEUQtKgLegQIFRAB&biw=2100&bih=1101&dpr=0.8){.uri}.
+    Data of urine output in MIMIC is suspicious (like 3000ml/h). So,
+    [**I completely ignored urine output in this
+    study**]{.underline}**.**
+2.  Min crea in -7d to 0d for 1st-carbapenem was defined as "base_crea"
+3.  Crea_value nearest to the 1st_abx and before 1st abx was defined as
+    "near_crea".
+4.  Max_crea after 1st_abx and within 7d was defined as "max_crea".
+5.  AKI stage at treatment was calculated with "base_crea" and
+    "near_crea". AKI stage after treatment was calculated with
+    "near_crea" and "max_crea".
+6.  The crea chage over 0.3 mg/dl within 48h (-\> AKI stage 1) was also
+    analyzed.
+
+```{r base KDIGO creatinine}
+###Start from creatinine data which obtained above (Basically those are not processed/filtered -> Fine to use.) 
+#Put 1st_ABX data from carbapenem_DF and calculate time difference to each creatinine measurement.
+#Erase crea after group transfer
+creatinine_b <- creatinine %>% rename("Crea_time" = charttime) %>% left_join(carbapenem_d, by="hadm_id") %>% distinct() %>% 
+  mutate("time_abx_to_Crea"=difftime(Crea_time, hadm_first_carbapenem_start, units = "hours")) %>% subset(time_abx_to_Crea<time_switch_group)
+
+###Base crea is min crea during -7d to -0d until 1st_ABX.
+#Extract base crea 
+base_creatinine_value <- creatinine_b %>% filter(time_abx_to_Crea<0&time_abx_to_Crea>-168) %>% group_by(hadm_id) %>% summarise(base_creatinine=min(creatinine, na.rm=TRUE))
+
+#Extract lowest crea between -48h to 0h
+bef48min_creatinine_value <- creatinine_b %>% filter(time_abx_to_Crea<0&time_abx_to_Crea>-48) %>% group_by(hadm_id) %>% summarise(min_bef48_creatinine=min(creatinine, na.rm=TRUE))
+
+#Extract nearest crea to 1st_abx (and before 1st_abx)
+bef_near_creatinine_value <- creatinine_b %>% filter(time_abx_to_Crea<0&time_abx_to_Crea>-168) %>% group_by(hadm_id) %>%
+                             filter(time_abx_to_Crea==min(time_abx_to_Crea)) %>% 
+                             rename("near_crea"=creatinine) %>% dplyr::select(hadm_id, near_crea)
+
+#Add base_crea and min48_crea to creatinine df  
+creatinine_c <- creatinine_b %>% left_join(base_creatinine_value, by="hadm_id") %>% left_join(bef48min_creatinine_value, by="hadm_id") %>%  left_join(bef_near_creatinine_value, by="hadm_id") %>% filter(!is.na(base_creatinine)) %>% distinct()
+
+###Check how many hadm have base creatinine. 
+creatinine_c$hadm_id %>% unique() %>% length() %>% paste0("pts with creatinine = ", .) #It should be same as "counts of hadm" in the above chunk.
+```
+
+\_\_
+
+```{r base creatinine assessment}
+###Extract crea data bef 1st_abx (-7d to 0d)
+bef_creatinine_c <- creatinine_c %>% filter(time_abx_to_Crea>-168, time_abx_to_Crea<0) %>% dplyr::select(hadm_id, base_creatinine, min_bef48_creatinine, near_crea) %>% distinct()
+
+###calculate ratio and difference to base crea 
+bef_creatinine_c$ratio_near_to_base <- bef_creatinine_c$near_crea / bef_creatinine_c$base_creatinine
+bef_creatinine_c$diff_near_to_min48 <- bef_creatinine_c$near_crea - bef_creatinine_c$min_bef48_creatinine
+  
+###Convert to KDIGO stage
+bef_creatinine_c$KDIGO_ratio <- ifelse(bef_creatinine_c$base_creatinine>4,3,
+                                  ifelse(bef_creatinine_c$near_crea>4,3,
+                                   ifelse(bef_creatinine_c$ratio_near_to_base>3,3,
+                                    ifelse(bef_creatinine_c$ratio_near_to_base>2,2,
+                                     ifelse(bef_creatinine_c$ratio_near_to_base>1.5,1,0)))))
+bef_creatinine_c$KDIGO_dif <- ifelse(bef_creatinine_c$diff_near_to_min48>0.299, 1, 0)
+bef_creatinine_c$KDIGO_crea <- pmax(bef_creatinine_c$KDIGO_ratio, bef_creatinine_c$KDIGO_dif)
+```
+
+##### **Assess AKI stage at initiation of carbapenems from dialysis data.**
+
+1.  Collect dialysis data
+2.  Assess whether the patients received dialysis before 1st_carbapenems
+    treatment (-7 to -0 day)
+3.  Whether the patients had received maintenance dialysis (before
+    treatment) is not considered.
+
+```{r base dialysis 0}
+###Next, cellct dialysis event from d_items and output events.
+###check ids for dialysis
+CRRT1_item_labels <- grep("CVV", ricu::mimic$d_items$label, value=TRUE)
+CRRT2_item_labels <- grep("CRR", ricu::mimic$d_items$label, value=TRUE)
+CRRT3_item_labels <- grep("Dialys",ricu::mimic$d_items$label, value=TRUE)
+RRTlabels <- c(CRRT1_item_labels, CRRT2_item_labels, CRRT3_item_labels)
+RRTids <- ricu::mimic$d_items$itemid[ricu::mimic$d_items$label %in% RRTlabels]
+RRTlabel <- ricu::mimic$d_items$label[ricu::mimic$d_items$itemid %in% RRTids]
+d_RRTitems0 <- data.frame(item=RRTids, label=RRTlabel)
+RRT_omits <- c("Site","Calcium","Dressing","Medication", "KCl","KCL","Access",
+               "Heparin", "Catheter","Solution","Fluid", "GLUC","patient")
+z <- paste(RRT_omits, collapse="|")
+d_RRTitems <- d_RRTitems0 %>% filter(!str_detect(label, z))
+d_RRTitems %>% head()
+```
+
+```{r base dialysis 1}
+###Collect dialysis data.
+###check dialysis from -7d to 1st_ABX
+###With hadm to 1st_ABX time frame assessment, those are defined as KDIGO3 at 1st_ABX and excluded from primary outcome analysis. 
+
+dial_chartevents <- ricu::load_src(ricu::mimic$chartevents, itemid %in% d_RRTitems$item) %>% dplyr::select(hadm_id, icustay_id, charttime, itemid) 
+dial_output <- ricu::load_src(ricu::mimic$outputevents, itemid %in% d_RRTitems$item) %>% dplyr::select(hadm_id, icustay_id, charttime, itemid) 
+dial_data <- rbind(dial_chartevents, dial_output) %>% subset(hadm_id %in% carbapenem_d$hadm_id) %>% 
+              left_join(d_RRTitems, by=c("itemid"="item")) %>% distinct()
+dial_data_b <- dial_data %>% left_join(carbapenem_d %>% dplyr::select(hadm_id, hadm_first_carbapenem_start, time_switch_group), by="hadm_id")
+dial_data_b$time_dial_to_1stabx <- difftime(dial_data_b$charttime, dial_data_b$hadm_first_carbapenem_start, units = "hours")
+
+dial_data_1st <- dial_data_b %>% subset(time_dial_to_1stabx>-168.1&time_dial_to_1stabx<168.1&time_dial_to_1stabx<time_switch_group) %>% group_by(hadm_id) %>% filter(time_dial_to_1stabx==min(time_dial_to_1stabx)) #delete daila after group switch
+```
+
+**\_\_**
+
+##### **Add age, sex, sofa score and base AKI stage to a master dataframe**
+
+```{r Put base_KDIGO factors to carbapenem_DF}
+#Add age, sex, icd9, sofa, base AKI data to master DF
+carbapenem_e <- carbapenem_d %>% left_join(age, by="icustay_id") %>% 
+  left_join(sex, by="icustay_id") %>% 
+  left_join(bmi, by="icustay_id") %>% 
+  left_join(bw, by="icustay_id") %>% 
+  left_join(icd9_df, by="icustay_id") %>% 
+  left_join(sofa3 %>% dplyr::select(icustay_id, sofa), by="icustay_id") %>% 
+  left_join(sofa_cns3 %>% dplyr::select(icustay_id, sofa_cns), by="icustay_id") %>% 
+  left_join(sofa_renal3 %>% dplyr::select(icustay_id, sofa_renal), by="icustay_id") %>% 
+  left_join(sep3 %>% dplyr::select(icustay_id, sep3), by="icustay_id") %>% 
+  left_join(qsofa3 %>% dplyr::select(icustay_id, qsofa), by="icustay_id") %>% 
+  left_join(sirs3 %>% dplyr::select(icustay_id, sirs), by="icustay_id") %>% 
+  left_join(bef_creatinine_c %>% dplyr::select(hadm_id, base_creatinine, near_crea, KDIGO_crea), by="hadm_id") %>% 
+  left_join(dial_data_1st %>% dplyr::select(hadm_id, time_dial_to_1stabx), by="hadm_id") %>% distinct()
+
+carbapenem_e <- carbapenem_e %>% rename("base_KDIGO_crea"=KDIGO_crea)
+carbapenem_e$base_KDIGO_dial <- ifelse(is.na(carbapenem_e$time_dial_to_1stabx),0, ifelse(carbapenem_e$time_dial_to_1stabx<0, 3, 0))
+carbapenem_e$base_KDIGO <- pmax(carbapenem_e$base_KDIGO_crea, carbapenem_e$base_KDIGO_dial)
+carbapenem_e$sofa_cns <- ifelse(is.na(carbapenem_e$sofa_cns), 0, carbapenem_e$sofa_cns) #30-40 sofa_cns are NA probably due to sedation (no NA for sofa_renal). inpute 0
+carbapenem_e$sofa_others0 <- carbapenem_e$sofa - carbapenem_e$sofa_cns - carbapenem_e$sofa_renal
+carbapenem_e$sofa_others <- ifelse(carbapenem_e$sofa_others0<0, 0, carbapenem_e$sofa_others0)
+#carbapenem_e %>% dplyr::select(sofa, sofa_cns, sofa_renal, sofa_others) %>% summary()
+```
+
+\_\_
+
+\_\_
+
+#### [**Next, outcome assessment.**]{.underline}
+
+#### **8. Collect data for outcome assessment (AKI until day 7 after initiation of carbapenems)**
+
+##### **First, use creatinine data for outcome assessment.**
+
+```{r outcome creatinine, message=F}
+###Put creatinine values after treatment and until 7d after treatment
+ICU_creatinine <- creatinine_c %>% subset(time_abx_to_Crea >-0.1 & time_abx_to_Crea <168.1& time_abx_to_Crea<time_switch_group) %>% dplyr::select(creatinine, hadm_id, icustay_id, time_ICUadmit_to_abx, time_abx_to_Crea, base_creatinine, near_crea)
+
+
+
+###Assess KDIGO changes with creatinine increase after treatment.
+###Assess the ratio of each measured creatinine to base creatinine, converting to KDIGO
+ICU_creatinine$ratio_to_base <- ICU_creatinine$creatinine/ICU_creatinine$base_crea
+ICU_creatinine$KDIGO_ratio <- ifelse(ICU_creatinine$base_crea>4, 3,
+                                  ifelse(ICU_creatinine$creatinine>4, 3,
+                                   ifelse(ICU_creatinine$ratio_to_base>3, 3,
+                                    ifelse(ICU_creatinine$ratio_to_base>2, 2,
+                                     ifelse(ICU_creatinine$ratio_to_base>1.5, 1 ,0)))))
+
+###Assess creatinine increase>0.3 within 48h
+ICU_creatinine$diff_to_base <- ICU_creatinine$creatinine - ICU_creatinine$base_crea
+ICU_creatinine$KDIGO_dif48 <- ifelse(ICU_creatinine$diff_to_base<0.3, 0, ifelse(ICU_creatinine$time_abx_to_Crea<48, 1, 0))
+
+ICU_creatinine$KDIGO_crea <- pmax(ICU_creatinine$KDIGO_ratio, ICU_creatinine$KDIGO_dif48)
+  
+  
+###calculate max crea ratio/diff for secondary outcoes assessment
+ICU_creatinine_summary <- ICU_creatinine %>% group_by(hadm_id) %>% 
+                          summarize("outcome_KDIGO_crea"=max(KDIGO_crea),
+                                    "outcome_max_crea_ratio"=max(ratio_to_base), 
+                                    "outcome_max_crea_diff"=max(diff_to_base))
+
+###Collect dialysis event. get outcome. Get first HD in the icustay
+ICU_dialevents_1st_summary <- dial_data_1st %>% subset(time_dial_to_1stabx>0) %>% summarize(time_dial_to_1stabx=min(time_dial_to_1stabx)) %>% mutate("outcome_KDIGO_dial"=3)
+
+###add to master DF
+carbapenem_f <- carbapenem_e %>% left_join(ICU_creatinine_summary, by="hadm_id") %>% left_join(ICU_dialevents_1st_summary, dplyr::select(hadm_id, time_dial_to_1stabx, outcome_KDIGO_dial), by="hadm_id") %>% distinct()
+carbapenem_f$outcome_KDIGO_dial <- ifelse(is.na(carbapenem_f$outcome_KDIGO_dial), 0, 3)
+carbapenem_f$outcome_KDIGO <- pmax(carbapenem_f$outcome_KDIGO_dial, carbapenem_f$outcome_KDIGO_crea)
+carbapenem_f$outcome_KDIGO_inc <- ifelse(carbapenem_f$base_KDIGO==3, NA, 
+                                    ifelse(carbapenem_f$base_KDIGO<carbapenem_f$outcome_KDIGO, T, F))
+carbapenem_f$outcome_new_dial <- ifelse(carbapenem_f$base_KDIGO_dial==3, NA, 
+                                        ifelse(carbapenem_f$outcome_KDIGO_dial==3, T, F))
+```
+
+\_\_
+
+#### **9. Other secondary outcomes**
+
+##### LOS_ICU, LOS_hospital, death in hospital (since mean value is 240 hr, those would be death in hospital not in ICU). 
+
+```{r Get dialysis outcome (between 1st Abx and ICU discharge, message=F}
+#Get ohter outcome data using "load_concept"
+ICU_intime_summary <- ricu::load_src(ricu::mimic$transfers) %>% filter(!is.na(icustay_id)) %>% group_by(icustay_id) %>% summarize("ICU_intime"=min(intime))
+death_DF0 <- ricu::load_concepts("death", src="mimic") %>% 
+                left_join(ICU_intime_summary, by="icustay_id") %>% mutate("time_death" = ICU_intime + index_var) %>% 
+                left_join(carbapenem_e %>% dplyr::select(icustay_id, hadm_id, hadm_first_carbapenem_start, time_switch_group)) %>%
+                filter(!is.na(hadm_first_carbapenem_start)) %>% mutate("time_abx_to_death" = time_death - hadm_first_carbapenem_start)
+death_DF <- death_DF0 %>% filter(time_abx_to_death<168, time_abx_to_death<time_switch_group) #erase data after group switch
+
+los_hosp_DF0 <- ricu::load_concepts("los_hosp", src="mimic") %>%
+                left_join(ICU_intime_summary, by="icustay_id") %>% mutate("time_loshp" = ICU_intime + los_hosp*3600*24) %>% 
+                left_join(carbapenem_e %>% dplyr::select(icustay_id, hadm_id, hadm_first_carbapenem_start, time_switch_group)) %>%
+                filter(!is.na(hadm_first_carbapenem_start)) %>% mutate("time_abx_to_loshp" = time_loshp - hadm_first_carbapenem_start)
+los_hosp_DF0$time_abx_to_loshp <- as.numeric(los_hosp_DF0$time_abx_to_loshp, units="hours")
+los_hosp_DF <- los_hosp_DF0 %>% filter(time_abx_to_loshp<168, time_abx_to_loshp<time_switch_group) #erase data after group switch
+
+
+dep_type_DF <- ricu::load_concepts("adm", src="mimic") %>% filter(icustay_id %in% carbapenem_f$icustay_id) %>% as.data.frame() %>% rename("dep_type" = adm)
+ethnicity_DF <- ricu::mimic$admissions %>% as.data.frame() %>% filter(hadm_id %in% carbapenem_f$hadm_id) %>% dplyr::select(hadm_id, ethnicity)
+
+#add to master DF
+carbapenem_g <- carbapenem_f %>% left_join(., los_hosp_DF %>% dplyr::select(hadm_id, time_abx_to_loshp), by="hadm_id") %>% 
+                                 left_join(., death_DF %>% dplyr::select(hadm_id, time_abx_to_death), by="hadm_id") %>% 
+                                 left_join(., dep_type_DF, by="icustay_id") %>% 
+                                 left_join(., ethnicity_DF, by="hadm_id") %>% distinct()
+
+carbapenem_g$death_in_hosp <- ifelse(is.na(carbapenem_g$time_abx_to_death), F, T)
+carbapenem_g$death_in_7d <- ifelse(is.na(carbapenem_g$time_abx_to_death), F, 
+                                                 ifelse(carbapenem_g$time_abx_to_death <168, T, F))
+carbapenem_g$outcome_KDIGO_inc_or_death <- ifelse(is.na(carbapenem_g$outcome_KDIGO_inc), NA, 
+                                            ifelse(carbapenem_g$outcome_KDIGO_inc==T, T,
+                                             ifelse(carbapenem_g$death_in_7d==T,T, F)))
+carbapenem_g$base_crea <- carbapenem_g$base_creatinine
+```
+
+```{r r3 culture, message=F}
+#cult_names <- "culture|CULTURE|Culture"
+cult_names <- "BLOOD CULTURE"
+non_cult_names <- "viral|VIRAL|Viral"
+
+m3_cult<- ricu::mimic$microbiologyevents[grep(cult_names, ricu::mimic$microbiologyevents$spec_type_desc, ignore.case=TRUE),] %>% .[!grep(non_cult_names, .$spec_type_sesc)] %>% dplyr::select(hadm_id, charttime) %>% left_join(carbapenem_g %>% dplyr::select(hadm_id, hadm_first_carbapenem_start), by="hadm_id") %>% filter(!is.na(hadm_first_carbapenem_start)) %>% mutate("time_cult_to_1stabx"=(charttime-hadm_first_carbapenem_start) %>% as.numeric()/3600) %>% filter(time_cult_to_1stabx> -72 & time_cult_to_1stabx<24) %>% mutate("pre_blood_culture"=T) %>% distinct()
+
+carbapenem_h <- carbapenem_g %>% left_join(m3_cult %>% dplyr::select(hadm_id, pre_blood_culture)) %>% distinct()
+carbapenem_h$pre_blood_culture <- ifelse(is.na(carbapenem_h$pre_blood_culture), F,
+                                              ifelse(carbapenem_h$pre_blood_culture==F, F, T))
+```
+
+```{r vancomycin}
+van_names <- "vanco|firvanq|lyphocin"
+received_van <- ricu::mimic$prescriptions[grep(van_names, ricu::mimic$prescriptions$drug, ignore.case=TRUE),]
+received_van$starttime <- received_van$startdate + dminutes(780)
+received_van$drug %>% unique()
+
+received_van2 <- left_join(received_van %>% dplyr::select(hadm_id, starttime),
+                              carbapenem_h %>% dplyr::select(hadm_id, hadm_first_carbapenem_start), by="hadm_id") %>% na.omit() %>% 
+  mutate("hour_van_to_abx"=(starttime-hadm_first_carbapenem_start)/3600 %>% as.numeric()) %>% filter(hour_van_to_abx>-72.1&hour_van_to_abx<24) %>% mutate("treat_van"=T)
+
+carbapenem_i <- left_join(carbapenem_h, received_van2 %>% dplyr::select(hadm_id, treat_van), by="hadm_id") %>% distinct() %>% mutate("treat_van"=ifelse(is.na(treat_van), F, T))
+```
+
+```{r vaso, message=F}
+vaso <-
+rbind(
+ricu::load_concepts("adh_rate", src="mimic") %>% filter(icustay_id %in% carbapenem_i$icustay_id) %>% .[,1:2],
+ricu::load_concepts("dobu_rate", src="mimic") %>% filter(icustay_id %in% carbapenem_i$icustay_id) %>% .[,1:2],
+ricu::load_concepts("dopa_rate", src="mimic") %>% filter(icustay_id %in% carbapenem_i$icustay_id) %>% .[,1:2],
+ricu::load_concepts("epi_rate", src="mimic") %>% filter(icustay_id %in% carbapenem_i$icustay_id) %>% .[,1:2],
+ricu::load_concepts("norepi_rate", src="mimic") %>% filter(icustay_id %in% carbapenem_i$icustay_id) %>% .[,1:2],
+ricu::load_concepts("phn_rate", src="mimic") %>% filter(icustay_id %in% carbapenem_i$icustay_id) %>% .[,1:2]) 
+
+
+vaso2 <- vaso %>% left_join(ICU_intime_summary, by="icustay_id") %>% mutate("vaso_time"=charttime+ICU_intime)
+vaso3 <- vaso2 %>% left_join(carbapenem_i %>% dplyr::select(icustay_id, hadm_first_carbapenem_start), by="icustay_id") %>% mutate("time_abx_to_vaso"=(vaso_time-hadm_first_carbapenem_start)) 
+
+vaso3$time_abx_to_vaso <- as.numeric(vaso3$time_abx_to_vaso, units="hours")
+vaso4 <- vaso3 %>% filter(time_abx_to_vaso> -168 & time_abx_to_vaso<0) %>% group_by(hadm_id) %>% summarize("vasopressor"=min(time_abx_to_vaso))
+
+carbapenem_j <- carbapenem_i %>% left_join(vaso4) %>% distinct()
+carbapenem_j$vasopressor <- ifelse(is.na(carbapenem_j$vasopressor), F, T)
+```
+
+```{r vent, message=F}
+vent <- rbind(
+ricu::load_concepts("vent_ind", src="mimic") %>% filter(icustay_id %in% carbapenem_j$icustay_id) %>% .[,1:3],
+ricu::load_concepts("mech_vent", src="mimic") %>% filter(icustay_id %in% carbapenem_j$icustay_id) %>% .[,1:3]) 
+  
+vent2 <- vent %>% left_join(ICU_intime_summary, by="icustay_id") %>% 
+                  left_join(carbapenem_j %>% dplyr::select(hadm_id, icustay_id, hadm_first_carbapenem_start), by="icustay_id") %>% 
+                  mutate("time_abx_to_vent_start"=as.numeric(starttime+ICU_intime-hadm_first_carbapenem_start, unit="hours"),
+                         "time_abx_to_vent_end"=vent_dur+time_abx_to_vent_start) %>% 
+                  filter((time_abx_to_vent_start<0 & time_abx_to_vent_end>0)) %>% mutate(ventilation=T) %>% distinct()
+
+carbapenem_k <- carbapenem_j %>% left_join(vent2 %>% dplyr::select(hadm_id, icustay_id, ventilation), by="hadm_id") %>% distinct()
+carbapenem_k$ventilation <- ifelse(is.na(carbapenem_k$ventilation), F, T)
+```
+
+```{r carbapenems count, message=F}
+carbapenems$drug2 <- ifelse(carbapenems$drug=="Imipenem-Cilastatin *NF*", "Imipenem-Cilastatin",
+                            ifelse(carbapenems$drug=="*NF* Ertapenem Sodium", "Ertapenem",
+                                   ifelse(carbapenems$drug=="Doripenem *NF*", "Doripenem", carbapenems$drug)))
+
+carbapenems_counts <- 
+carbapenems %>% filter(drug!="Meropenem Desensitization") %>% dplyr::select(hadm_id, drug2, startdate2) %>% 
+  left_join(carbapenem_k %>% dplyr::select(hadm_id, hadm_first_carbapenem_start), by="hadm_id") %>% 
+  mutate("time_first_abx_to_abx"=difftime(startdate2, hadm_first_carbapenem_start)/3600) %>% filter(time_first_abx_to_abx<168) %>% 
+  group_by(hadm_id, drug2) %>% summarise(n()) %>% pivot_wider(names_from = drug2, values_from = "n()") %>% mutate("Imipenem/Cilastatin/Relebactam"=0)
+
+carbapenems_counts[is.na(carbapenems_counts)] <- 0
+
+carbapenem_l <- left_join(carbapenem_k, carbapenems_counts, by="hadm_id")
+```
+
+```{r observation period, message=F}
+crea_ob_DF <- creatinine %>% rename("crea_time" = charttime) %>% left_join(carbapenem_l, by="hadm_id") %>% distinct() %>% 
+              mutate("time_abx_to_crea"=difftime(crea_time, hadm_first_carbapenem_start, units = "hours")) %>% 
+              group_by(hadm_id) %>% summarize('last_crea'=max(time_abx_to_crea)) %>% na.omit()
+dial_ob_DF <- dial_data_b %>% group_by(hadm_id) %>% summarize('last_dial'=max(time_dial_to_1stabx)) 
+
+obs_summary <- crea_ob_DF %>% dplyr::select(hadm_id, last_crea) %>% 
+                left_join(dial_ob_DF %>% dplyr::select(hadm_id, last_dial), by="hadm_id") %>% 
+                left_join(death_DF0 %>% dplyr::select(hadm_id, time_abx_to_death), by="hadm_id") %>% 
+                left_join(los_hosp_DF0 %>% dplyr::select(hadm_id, time_abx_to_loshp), by="hadm_id") %>% 
+               left_join(carbapenem_l %>% dplyr::select(hadm_id, time_switch_group), by="hadm_id")
+
+obs_summary$obs_period0 <- pmax(obs_summary$last_crea, obs_summary$last_dial, obs_summary$time_abx_to_death, obs_summary$time_abx_to_loshp, na.rm = T)
+obs_summary$obs_period <- pmin(obs_summary$obs_period0, obs_summary$time_switch_group, 168, na.rm = T)
+carbapenem_m <- left_join(carbapenem_l, obs_summary %>% dplyr::select(hadm_id, obs_period, time_abx_to_death, time_abx_to_loshp), by="hadm_id")
+```
+
+```{r rev drug dose, message=F, warning=F }
+#Injection data only contain dose, startdate, and enddate
+#dose*(enddate-startdate) will be defined as the durg dose during the period.
+
+#somehow, rawid:1884359	(hadm_id:182757) had no end time. But the patient have another drug 3 days later (2120-01-04 13:00). Impute the same time.
+received_carbapenems$enddate <- ifelse(received_carbapenems$row_id==1884359, 4733683200, received_carbapenems$enddate)
+
+#insert start_time and other data in master data to the durg data. Since "startdate=enddate" means assumably 24h-treatment, 24h was added to the enddate 
+rev_penems <- received_carbapenems %>% left_join(carbapenem_m %>% dplyr::select(hadm_first_carbapenem_start, hadm_id, obs_period), by="hadm_id") %>% mutate("inj_time"=difftime(startdate2, hadm_first_carbapenem_start, unit="h"), "end_time"=difftime(enddate, hadm_first_carbapenem_start, unit="h")+13+24) %>% subset(!is.na(inj_time)&inj_time>-0.1&inj_time<obs_period)
+rev_penems$dose_val_rx <- rev_penems$dose_val_rx %>% as.numeric()
+
+#total dose
+rev_penems$drug_time <- pmin(rev_penems$obs_period, rev_penems$end_time)-rev_penems$inj_time
+rev_penems$drug_dose_per24 <- rev_penems$drug_time * rev_penems$dose_val_rx /24 
+attributes(rev_penems$drug_dose_per24) <- NULL
+rev_penems %>% group_by(drug, dose_val_rx, dose_unit_rx) %>% summarize() %>% arrange(dose_val_rx)
+total_dose <- rev_penems %>% group_by(hadm_id, drug) %>% summarize(total_dose=sum(drug_dose_per24))
+
+#dose in the first date
+ini24h_dose <- rev_penems %>% subset(inj_time==0) %>% group_by(hadm_id, drug) %>% summarize(ini24h_dose=sum(dose_val_rx))
+
+#duration of the treatment
+drug_duration <- rev_penems %>% group_by(hadm_id, drug, obs_period) %>% summarise("last_drug"=max(end_time)) %>% mutate("last_drug_in_obs"=pmin(last_drug, obs_period))
+
+carbapenem_n <- carbapenem_m %>% left_join(total_dose %>% dplyr::select(hadm_id, drug, total_dose), by=c("hadm_id", "drug")) %>% 
+                                 left_join(ini24h_dose %>% dplyr::select(hadm_id, drug, ini24h_dose), by=c("hadm_id", "drug")) %>% 
+                                 left_join(drug_duration %>% dplyr::select(hadm_id, drug,last_drug_in_obs), by=c("hadm_id", "drug"))
+#All pts are I/C or Meropenem in MIMIC3 (found with carbapenem_n$drug %>% unique). -> put NA for other drug doses.
+carbapenem_n$total_dose_ICM <- carbapenem_n$total_dose
+carbapenem_n$total_dose_recabrio <- NA
+carbapenem_n$total_dose_erta <- NA
+carbapenem_n$total_dose_dori <- NA
+
+carbapenem_n$ini24h_dose_ICM <- carbapenem_n$ini24h_dose
+carbapenem_n$ini24h_dose_recabrio <- NA
+carbapenem_n$ini24h_dose_erta <- NA
+carbapenem_n$ini24h_dose_dori <- NA
+```
+
+```{r rev nephrotoxic drugs, warning=F, message=F}
+#Name of nephrotoxic drugs (NSAIDS, contrast agent, aminoglycosides)
+NSAIDS_names <- "Voltaren|profen|proxen|coxib|diclofenac|aspirin|indomethacin|ketorolac" 
+RADIOC_names <- "iothalamate|ethiodized|iodipamide|lipiodol|omnipaque|conray|hypaque|reno-Oraltag|Optiray|Ultravist|Isovue|Iomervu|Visipaque|contrast" #no include Gastroview and gastrografin
+AG_names <-"kacin|mycin|micin|Arikayce|tobi|Kitabis|Zemdri|genta|streptom|paromom|neom|tobtam|plazom|amikac"
+
+#exclude vancomycin (baited with "mycin") and aspirin 81/162mg (for anti-platelet purpose)
+#And, put drug categories (NSAIDS, RADIOC, or AG)
+received_rev_nt00 <- ricu::mimic$prescriptions[grep(paste0(NSAIDS_names, RADIOC_names, AG_names), ricu::mimic$prescriptions$drug, ignore.case=T),]
+received_rev_nt0 <- received_rev_nt00 %>% mutate(
+                      rev_nt_type = case_when(grepl("vanco|Erythro|Azithromycin|Clindamycin|Daptomycin|Dactinomycin|DAPTOmycin|Gel|Fosfomycin|Ophth|Clarithromycin|Fidaxomicin|Mitomycin|Ozogamicin|Aspirin 81|diclofenac sodium 1%|Aspirin Desens|Dipyridamole-Aspirin|Excedrin Aspirin Free|Desensitization|Ointment|placebo",
+                                          drug, ignore.case=T) ~ "exclude",
+                                          grepl("ointment|81mg", prod_strength, ignore.case=T) ~ "exclude",
+                                          route %in% c("TP", "OD", "OU", "OS", "AD", "AS", "AU", "PV", "VT","BOTH EARS", "LEFT EAR", "RIGHT EAR","NS", "NEB", "INHALATION", "IH","BOTH EYES", "LEFT EYE", "RIGHT EYE") ~"exclude",
+                                          grepl("aspirin", drug, ignore.case=T) & dose_val_rx %in% c(81, 162) ~ "exclude", 
+                                          grepl(NSAIDS_names, drug, ignore.case=T) ~ "NSAIDS", 
+                                          grepl(RADIOC_names, drug, ignore.case=T) ~ "RADIOC", 
+                                          grepl(AG_names, drug, ignore.case=T) ~ "AG", 
+                                                T ~ "ohter"))
+received_rev_nt <- received_rev_nt0 %>% subset(rev_nt_type!="exclude")
+#checking
+received_rev_nt  %>% subset(rev_nt_type=="AG") %>%  group_by(drug, prod_strength, dose_unit_rx, form_unit_disp, route) %>% summarize()
+#m4_received_rev_nt  %>% subset(rev_nt_type=="AG") %>% .$drug %>% unique()
+
+#Arrange drug data and limit data between -72h~24h from the inclusion.
+received_rev_nt$starttime <- received_rev_nt$startdate + dminutes(780)
+received_rev_nt2 <- left_join(received_rev_nt %>% dplyr::select(hadm_id, starttime, rev_nt_type),
+                              carbapenem_n %>% dplyr::select(hadm_id, hadm_first_carbapenem_start), by="hadm_id") %>% na.omit() %>% 
+                    mutate("hour_revnt_to_abx"=(starttime-hadm_first_carbapenem_start)/3600 %>% as.numeric()) %>%
+                    filter(hour_revnt_to_abx>-72.1&hour_revnt_to_abx<24)
+
+#Put the results to master DF.
+carbapenem_o <- left_join(carbapenem_n, 
+                          received_rev_nt2 %>% subset(rev_nt_type=="NSAIDS") %>% dplyr::select(hadm_id, rev_nt_type), by="hadm_id") %>% 
+                            distinct() %>% rename("treat_NSAIDs"=rev_nt_type) %>% 
+                left_join(received_rev_nt2 %>% subset(rev_nt_type=="RADIOC") %>% dplyr::select(hadm_id, rev_nt_type), by="hadm_id") %>% 
+                            distinct() %>% rename("treat_RADIOC"=rev_nt_type) %>% 
+                left_join(received_rev_nt2 %>% subset(rev_nt_type=="AG") %>% dplyr::select(hadm_id, rev_nt_type), by="hadm_id") %>% 
+                            distinct() %>% rename("treat_AG"=rev_nt_type)
+carbapenem_o <- carbapenem_o %>% mutate(nt_drug = treat_van|!is.na(treat_NSAIDs)|!is.na(treat_RADIOC)|!is.na(treat_AG))
+
+carbapenem_o %>% group_by(treat_van, treat_NSAIDs, treat_RADIOC, treat_AG, nt_drug) %>% summarize(n())
+```
+
+```{r data save}
+saveRDS(creatinine_c, "creatinine_c.rds")
+write.csv(carbapenem_o, "MDF_mimic3.csv")
+read.csv("MDF_mimic3.csv")  %>% group_by(drug_type) %>% summarise(n()) %>% 
+  cbind(read.csv("MDF_mimic3.csv") %>% filter(base_KDIGO<2.9) %>% group_by(drug_type) %>% summarise(n()) %>% dplyr::select(-drug_type))
+```
